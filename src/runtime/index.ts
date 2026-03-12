@@ -1,0 +1,11 @@
+export { RunController } from './run-controller.js';
+export { runClaude } from './claude-adapter.js';
+export type { ClaudeRunResult, ClaudeAdapterOptions } from './claude-adapter.js';
+export { buildPrompt } from './prompt-builder.js';
+export { normalizeOutput } from './output-normalizer.js';
+export { prepareWorktree, cleanupWorktree } from './worktree-manager.js';
+export type { WorktreeResult } from './worktree-manager.js';
+export { collectArtifacts } from './artifact-collector.js';
+export type { ArtifactCollection } from './artifact-collector.js';
+export { sendChatTurn, parseChatTurnResult } from './chat-adapter.js';
+export type { ChatAdapterOptions } from './chat-adapter.js';
