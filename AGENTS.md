@@ -93,3 +93,16 @@ When implementing:
 When uncertain:
 - inspect the repo and propose options
 - do not invent existing code or files
+
+## Cursor Cloud specific instructions
+
+This is a single-service TypeScript VS Code extension with no external dependencies (no Docker, databases, or network services). All persistence is local JSON in `.morticus/`.
+
+**Key commands** are in `package.json` scripts — see `CLAUDE.md` for the full list (`npm run build`, `npm test`, `npm run lint`, etc.).
+
+**Running the extension:** Launch VS Code in Extension Development Host mode with `code --extensionDevelopmentPath=/workspace <workspace-dir> --no-sandbox --disable-gpu`. The extension activates when a `.morticus/project.json` exists in the opened workspace (or when the user runs "Morticus: Initialize Project" from the command palette).
+
+**Testing caveats:**
+- The VS Code API is mocked in tests via `test/__mocks__/vscode.ts` (aliased in `vitest.config.ts`). Tests do not require a running VS Code instance.
+- The Claude CLI adapter (`src/runtime/claude-adapter.ts`) is mocked in integration tests. No `claude` binary is needed for running tests.
+- Vitest emits a CJS deprecation warning from Vite — this is cosmetic and does not affect test results.
