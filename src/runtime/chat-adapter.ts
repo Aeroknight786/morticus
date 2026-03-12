@@ -113,6 +113,7 @@ export interface ChatAdapterOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   workingDirectory: string;
+  model?: string;
 }
 
 export async function sendChatTurn(
@@ -147,6 +148,7 @@ export async function sendChatTurn(
     workingDirectory: options.workingDirectory,
     timeoutMs: options.timeoutMs ?? 120_000,
     signal: options.signal,
+    model: options.model,
   });
 
   return parseChatTurnResult(result.stdout);

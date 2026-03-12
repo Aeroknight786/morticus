@@ -19,6 +19,7 @@ import { normalizeOutput } from './output-normalizer.js';
 export interface RunControllerDeps {
   store: ProjectStore;
   workspaceRoot: string;
+  model?: string;
 }
 
 export interface RunResult {
@@ -36,10 +37,12 @@ export interface RunResult {
 export class RunController {
   private store: ProjectStore;
   private workspaceRoot: string;
+  private model?: string;
 
   constructor(deps: RunControllerDeps) {
     this.store = deps.store;
     this.workspaceRoot = deps.workspaceRoot;
+    this.model = deps.model;
   }
 
   async execute(task: TaskNode, abortSignal?: AbortSignal): Promise<RunResult> {
@@ -94,6 +97,7 @@ export class RunController {
         workingDirectory: worktreeResult.path ?? this.workspaceRoot,
         timeoutMs: 300_000,
         signal: abortSignal,
+        model: this.model,
       });
 
       // 5. Persist raw output

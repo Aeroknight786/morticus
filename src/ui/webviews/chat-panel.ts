@@ -325,7 +325,7 @@ export class ChatPanel extends WebviewBase {
         state,
         memory,
         this.session.mode,
-        { workingDirectory: this.workspaceRoot },
+        { workingDirectory: this.workspaceRoot, model: 'haiku' },
       );
 
       // Build assistant message

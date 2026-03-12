@@ -11,6 +11,7 @@ export interface ClaudeAdapterOptions {
   workingDirectory: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  model?: string;
 }
 
 // Cached path to the claude binary after first lookup.
@@ -48,7 +49,10 @@ export async function runClaude(
 
     let proc: child_process.ChildProcess;
     try {
-      proc = child_process.spawn(claudePath, ['--print', prompt], {
+      const args = options.model
+        ? ['--print', '--model', options.model, prompt]
+        : ['--print', prompt];
+      proc = child_process.spawn(claudePath, args, {
         cwd: options.workingDirectory,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
