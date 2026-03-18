@@ -3,9 +3,9 @@ import { buildPrompt } from '../../../src/runtime/prompt-builder.js';
 import type { ContextPack } from '../../../src/domain/task-spec.js';
 
 const basePack: ContextPack = {
-  stablePrefix: 'You are a helpful assistant working on project Morticus.',
+  stablePrefix: '## Project Rules and Standards\n\n[coding_standard] Entry A: content A\n\n[coding_standard] Entry B: content B',
   canonicalStateSummary: 'Phase: alpha | Goal: Build the engine | Next: Write tests',
-  relevantMemoryEntries: ['Entry A', 'Entry B'],
+  relevantMemoryEntries: [],
   scopeDescription: 'src/runtime/',
   taskGoal: 'Understand the runtime layer',
   constraints: ['Do not modify production data', 'Read-only scope'],
@@ -24,11 +24,13 @@ describe('buildPrompt', () => {
     expect(prompt).toContain(basePack.canonicalStateSummary);
   });
 
-  it('includes relevant memory entries under Relevant Context', () => {
+  it('includes memory entries in stablePrefix section', () => {
     const prompt = buildPrompt(basePack);
-    expect(prompt).toContain('## Relevant Context');
+    expect(prompt).toContain('## Project Rules and Standards');
     expect(prompt).toContain('Entry A');
     expect(prompt).toContain('Entry B');
+    // Memory is in stablePrefix only — no separate Relevant Context section
+    expect(prompt).not.toContain('## Relevant Context');
   });
 
   it('includes task goal and scope', () => {

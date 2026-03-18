@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createChatSession, mergeDraftState } from '../../../src/domain/chat.js';
-import type { DraftCanonicalState, ChatSession } from '../../../src/domain/chat.js';
+import { createChatSession, mergeDraftState, mergeDraftTasks } from '../../../src/domain/chat.js';
+import type { DraftCanonicalState, DraftTask, ChatSession } from '../../../src/domain/chat.js';
 import type { ChatSessionId, ProjectId } from '../../../src/domain/ids.js';
 
 describe('createChatSession', () => {
@@ -112,5 +112,71 @@ describe('mergeDraftState', () => {
     expect(state.goal).toBe('Refined goal');
     expect(state.phase).toBe('planning');
     expect(state.constraints).toEqual(['C1', 'C2']);
+  });
+});
+
+describe('mergeDraftTasks', () => {
+  const task1: DraftTask = { title: 'Setup project', goal: 'Scaffold', taskType: 'implementation', scopePaths: [] };
+  const task2: DraftTask = { title: 'Research auth', goal: 'Evaluate options', taskType: 'discovery', scopePaths: ['src/auth/'] };
+  const task3: DraftTask = { title: 'Write tests', goal: 'Unit tests', taskType: 'validation', scopePaths: ['test/'] };
+
+  it('adds new tasks to empty list', () => {
+    const result = mergeDraftTasks([], [task1, task2]);
+    expect(result).toHaveLength(2);
+    expect(result[0].title).toBe('Setup project');
+    expect(result[1].title).toBe('Research auth');
+  });
+
+  it('preserves existing tasks not in incoming', () => {
+    const result = mergeDraftTasks([task1], [task2]);
+    expect(result).toHaveLength(2);
+    expect(result[0].title).toBe('Setup project');
+    expect(result[1].title).toBe('Research auth');
+  });
+
+  it('updates existing tasks matched by normalized title', () => {
+    const updated1: DraftTask = { title: 'Setup project', goal: 'New goal', taskType: 'discovery', scopePaths: ['src/'] };
+    const result = mergeDraftTasks([task1, task2], [updated1]);
+    expect(result).toHaveLength(2);
+    expect(result[0].title).toBe('Setup project');
+    expect(result[0].goal).toBe('New goal');
+    expect(result[0].taskType).toBe('discovery');
+    expect(result[1].title).toBe('Research auth');
+  });
+
+  it('matches titles case-insensitively', () => {
+    const incoming: DraftTask = { title: 'SETUP PROJECT', goal: 'Updated', taskType: 'implementation', scopePaths: [] };
+    const result = mergeDraftTasks([task1], [incoming]);
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('SETUP PROJECT');
+    expect(result[0].goal).toBe('Updated');
+  });
+
+  it('trims whitespace for title matching', () => {
+    const incoming: DraftTask = { title: '  Setup project  ', goal: 'Updated', taskType: 'implementation', scopePaths: [] };
+    const result = mergeDraftTasks([task1], [incoming]);
+    expect(result).toHaveLength(1);
+    expect(result[0].goal).toBe('Updated');
+  });
+
+  it('handles mix of updates and additions', () => {
+    const updated2: DraftTask = { title: 'Research auth', goal: 'Deep dive', taskType: 'discovery', scopePaths: [] };
+    const result = mergeDraftTasks([task1, task2], [updated2, task3]);
+    expect(result).toHaveLength(3);
+    expect(result[0].title).toBe('Setup project');
+    expect(result[1].goal).toBe('Deep dive');
+    expect(result[2].title).toBe('Write tests');
+  });
+
+  it('does not duplicate when incoming has same task twice', () => {
+    const result = mergeDraftTasks([], [task1, task1]);
+    // Second occurrence updates the first in-place
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('Setup project');
+  });
+
+  it('returns empty array when both inputs are empty', () => {
+    const result = mergeDraftTasks([], []);
+    expect(result).toEqual([]);
   });
 });

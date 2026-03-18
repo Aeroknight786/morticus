@@ -8,7 +8,7 @@ import { createStateDelta, type DeltaOperation, type StateDelta } from '../domai
 
 export function buildDelta(
   proposed: ProposedDelta,
-  taskId: TaskId,
+  taskId: TaskId | null,
   baseStateVersion: StateVersion,
 ): StateDelta {
   const operations: DeltaOperation[] = [];

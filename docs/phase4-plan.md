@@ -1,7 +1,7 @@
 # Phase 4: Conversational Steering
 
 ## Status
-Planned — not yet implemented.
+Phase 4A: shipped (171 tests). Phase 4A.5: shipped (195 tests). Phase 4A.6: shipped (206 tests). Phase 4B.1: next ("What should we do next?").
 
 ## Phasing
 

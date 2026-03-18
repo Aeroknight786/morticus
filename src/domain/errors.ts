@@ -10,7 +10,9 @@ export type ErrorCode =
   | 'WORKTREE_ERROR'
   | 'PROJECT_NOT_FOUND'
   | 'TASK_NOT_FOUND'
-  | 'PROJECT_ALREADY_EXISTS';
+  | 'PROJECT_ALREADY_EXISTS'
+  | 'SCHEMA_VERSION_TOO_NEW'
+  | 'MIGRATION_ERROR';
 
 export class MorticusError extends Error {
   constructor(

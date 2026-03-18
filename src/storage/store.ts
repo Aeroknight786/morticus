@@ -5,6 +5,7 @@ import { createInitialState } from '../domain/canonical-state.js';
 import { createEmptyMemory } from '../domain/durable-memory.js';
 import { MorticusError } from '../domain/errors.js';
 import { readJson, writeJson, fileExists, ensureDir } from './json-backend.js';
+import { runMigrations } from './migrator.js';
 import { StateStore } from './state-store.js';
 import { TaskStore } from './task-store.js';
 import { DeltaStore } from './delta-store.js';
@@ -26,6 +27,7 @@ export class ProjectStore {
   readonly specs: SpecStore;
   readonly runs: RunStore;
   readonly chat: ChatStore;
+  private migrated = false;
 
   constructor(workspacePath: string) {
     this.morticusPath = path.join(workspacePath, MORTICUS_DIR);
@@ -75,10 +77,17 @@ export class ProjectStore {
     return project;
   }
 
+  async ensureMigrated(): Promise<void> {
+    if (this.migrated) return;
+    await runMigrations(this.morticusPath);
+    this.migrated = true;
+  }
+
   async getProject(): Promise<Project> {
     if (!(await this.isInitialized())) {
       throw new MorticusError('No project found', 'PROJECT_NOT_FOUND');
     }
+    await this.ensureMigrated();
     return readJson<Project>(this.projectFilePath);
   }
 

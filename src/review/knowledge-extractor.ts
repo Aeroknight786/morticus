@@ -14,7 +14,7 @@ import { generateMemoryEntryId } from '../domain/ids.js';
 export function extractKnowledge(
   operations: DeltaOperation[],
   taskTitle: string,
-  taskId: TaskId,
+  taskId: TaskId | null,
   runId: RunId | null,
   deltaId: DeltaId,
 ): MemoryEntry[] {

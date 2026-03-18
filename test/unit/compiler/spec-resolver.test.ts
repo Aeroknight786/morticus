@@ -2,8 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { resolveTaskSpec } from '../../../src/compiler/spec-resolver.js';
 import { createInitialState, applyDeltaOperations } from '../../../src/domain/canonical-state.js';
 import { createEmptyMemory } from '../../../src/domain/durable-memory.js';
+import type { DurableMemory, MemoryEntry } from '../../../src/domain/durable-memory.js';
 import { createTask } from '../../../src/domain/task.js';
-import { generateTaskId, generateProjectId, generateDeltaId } from '../../../src/domain/ids.js';
+import { generateTaskId, generateProjectId, generateDeltaId, generateMemoryEntryId } from '../../../src/domain/ids.js';
 
 describe('resolveTaskSpec', () => {
   const projectId = generateProjectId();
@@ -112,5 +113,79 @@ describe('resolveTaskSpec', () => {
     );
     const spec = resolveTaskSpec(task, state, memory);
     expect(spec.contextPack.stablePrefix).toBe('');
+  });
+
+  it('discovery task excludes test_convention memory category', () => {
+    const state = createInitialState();
+    const now = new Date().toISOString();
+    const makeEntry = (category: MemoryEntry['category'], title: string): MemoryEntry => ({
+      id: generateMemoryEntryId(),
+      category,
+      title,
+      content: `${title} content`,
+      createdAt: now,
+      updatedAt: now,
+      active: true,
+      origin: 'user',
+      sourceTaskId: null,
+      sourceRunId: null,
+      sourceDeltaId: null,
+      sourceOperationType: null,
+      reviewed: true,
+      normalizedValue: null,
+    });
+    const memory: DurableMemory = {
+      ...createEmptyMemory(),
+      entries: [
+        makeEntry('coding_standard', 'CS'),
+        makeEntry('test_convention', 'TC'),
+        makeEntry('architecture_invariant', 'AI'),
+      ],
+    };
+    const task = createTask(
+      generateTaskId(), projectId, 'Explore',
+      'Find things', 'discovery',
+      { paths: ['src/'], readOnly: true, writePermissions: [] }, 1,
+    );
+    const spec = resolveTaskSpec(task, state, memory);
+    expect(spec.contextPack.stablePrefix).toContain('CS');
+    expect(spec.contextPack.stablePrefix).toContain('AI');
+    expect(spec.contextPack.stablePrefix).not.toContain('TC');
+  });
+
+  it('validation task excludes domain_glossary memory category', () => {
+    const state = createInitialState();
+    const now = new Date().toISOString();
+    const makeEntry = (category: MemoryEntry['category'], title: string): MemoryEntry => ({
+      id: generateMemoryEntryId(),
+      category,
+      title,
+      content: `${title} content`,
+      createdAt: now,
+      updatedAt: now,
+      active: true,
+      origin: 'user',
+      sourceTaskId: null,
+      sourceRunId: null,
+      sourceDeltaId: null,
+      sourceOperationType: null,
+      reviewed: true,
+      normalizedValue: null,
+    });
+    const memory: DurableMemory = {
+      ...createEmptyMemory(),
+      entries: [
+        makeEntry('coding_standard', 'CS'),
+        makeEntry('domain_glossary', 'DG'),
+      ],
+    };
+    const task = createTask(
+      generateTaskId(), projectId, 'Validate',
+      'Run checks', 'validation',
+      { paths: ['src/'], readOnly: true, writePermissions: [] }, 1,
+    );
+    const spec = resolveTaskSpec(task, state, memory);
+    expect(spec.contextPack.stablePrefix).toContain('CS');
+    expect(spec.contextPack.stablePrefix).not.toContain('DG');
   });
 });

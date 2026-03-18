@@ -35,7 +35,7 @@ export type ConflictType =
 
 export interface StateDelta {
   id: DeltaId;
-  taskId: TaskId;
+  taskId: TaskId | null;
   baseStateVersion: StateVersion;
   operations: DeltaOperation[];
   evidenceRefs: EvidenceId[];
@@ -56,7 +56,7 @@ export interface AppliedStateDelta {
 
 export function createStateDelta(
   id: DeltaId,
-  taskId: TaskId,
+  taskId: TaskId | null,
   baseStateVersion: StateVersion,
   operations: DeltaOperation[],
 ): StateDelta {

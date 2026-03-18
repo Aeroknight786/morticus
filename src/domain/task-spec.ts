@@ -1,5 +1,6 @@
 import { SpecId, TaskId, StateVersion } from './ids.js';
 import type { WritePermission } from './task.js';
+import type { MemoryCategory } from './durable-memory.js';
 
 export interface TaskSpec {
   id: SpecId;
@@ -62,6 +63,13 @@ export interface ContextPackOptions {
   includeKnownFiles: boolean;
   // Max memory entries to include (default: all active)
   maxMemoryEntries: number | null;
+  // Only include these memory categories (default: null = all)
+  includeCategories: MemoryCategory[] | null;
+  // Exclude these memory categories (default: null = none excluded)
+  excludeCategories: MemoryCategory[] | null;
+  // Max estimated tokens for the context pack (default: null = no limit).
+  // When exceeded, lower-priority content is trimmed progressively.
+  maxTokens: number | null;
 }
 
 // Intermediate type: what the user or LLM provides before deterministic compilation

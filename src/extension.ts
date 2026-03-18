@@ -41,7 +41,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   vscode.commands.executeCommand('setContext', 'morticus.projectInitialized', initialized);
 
   if (initialized) {
+    await store.ensureMigrated();
     statusBar.refresh();
+    // Auto-open chat as the home surface for returning projects.
+    // Only fires once per activation; no-op if a Morticus panel is already visible.
+    vscode.commands.executeCommand('morticus.openChat');
   }
 }
 

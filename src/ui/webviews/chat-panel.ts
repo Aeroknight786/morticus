@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import { WebviewBase } from './webview-base.js';
 import type { ProjectStore } from '../../storage/store.js';
-import type { ChatMessage, DraftCanonicalState, DraftTask, ChatSession } from '../../domain/chat.js';
-import { createChatSession, mergeDraftState } from '../../domain/chat.js';
-import { generateChatSessionId, generateChatMessageId, generateTaskId } from '../../domain/ids.js';
+import type { ChatMessage, DraftCanonicalState, DraftTask, ChatSession, TaskContext } from '../../domain/chat.js';
+import { createChatSession, mergeDraftState, mergeDraftTasks } from '../../domain/chat.js';
+import { generateChatSessionId, generateChatMessageId, generateTaskId, generateSuggestionId, generateDeltaId } from '../../domain/ids.js';
+import { createStateDelta, type DeltaOperation, type StateDelta } from '../../domain/state-delta.js';
+import { validateDelta } from '../../review/validator.js';
 import { createTask } from '../../domain/task.js';
 import { createInitialState, type CanonicalProjectState } from '../../domain/canonical-state.js';
 import { sendChatTurn } from '../../runtime/chat-adapter.js';
@@ -17,6 +19,7 @@ export class ChatPanel extends WebviewBase {
     private store: ProjectStore,
     private workspaceRoot: string,
     private onStateAccepted: () => void,
+    private onDeltaProposed?: (delta: StateDelta) => Promise<void>,
   ) {
     super(extensionUri, 'morticus.chatPanel', 'Morticus Chat');
   }
@@ -29,10 +32,14 @@ export class ChatPanel extends WebviewBase {
   private async loadSession(): Promise<void> {
     this.session = await this.store.chat.get();
 
+    // Backward compatibility: sessions saved before 4A.6 lack pendingSuggestedTasks
+    if (this.session && !this.session.pendingSuggestedTasks) {
+      this.session.pendingSuggestedTasks = [];
+    }
+
     if (!this.session) {
       const project = await this.store.getProject();
       const stateVersion = await this.store.state.getCurrentVersion();
-      // Check if state is empty (kickoff) or populated (steering)
       let mode: 'kickoff' | 'steering' = 'kickoff';
       if (stateVersion >= 1) {
         const state = await this.store.state.getCurrentState();
@@ -47,12 +54,44 @@ export class ChatPanel extends WebviewBase {
       await this.store.chat.save(this.session);
     }
 
+    // Build goal summary for steering welcome
+    let goalSummary = '';
+    if (this.session.mode === 'steering') {
+      try {
+        const state = await this.store.state.getCurrentState();
+        if (state.goal) {
+          goalSummary = state.goal.length > 80 ? state.goal.slice(0, 77) + '...' : state.goal;
+        }
+      } catch { /* no state yet */ }
+    }
+
     this.postMessage({
       type: 'init',
       mode: this.session.mode,
       messages: this.session.messages,
       draftState: this.session.currentDraftState,
+      draftTasks: this.session.draftTasks,
+      pendingSuggestedTasks: this.session.pendingSuggestedTasks,
+      goalSummary,
     });
+  }
+
+  private async buildTaskContext(): Promise<TaskContext> {
+    const tasks = await this.store.tasks.list();
+    const activeStatuses = ['draft', 'ready', 'running', 'awaiting_completion', 'normalizing_output'];
+    return {
+      activeTasks: tasks
+        .filter(t => activeStatuses.includes(t.status))
+        .map(t => ({ title: t.title, taskType: t.taskType, status: t.status })),
+      recentlyCompleted: tasks
+        .filter(t => t.status === 'merged')
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        .slice(0, 5)
+        .map(t => ({ title: t.title, taskType: t.taskType, goal: t.goal })),
+      awaitingReview: tasks
+        .filter(t => t.status === 'awaiting_review')
+        .map(t => ({ title: t.title })),
+    };
   }
 
   protected getHtml(): string {
@@ -68,6 +107,7 @@ export class ChatPanel extends WebviewBase {
     .msg { margin-bottom: 12px; padding: 10px 14px; border-radius: 8px; max-width: 85%; white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; font-size: 13px; }
     .msg-user { background: var(--vscode-button-background); color: var(--vscode-button-foreground); margin-left: auto; }
     .msg-assistant { background: var(--vscode-input-background); border: 1px solid var(--vscode-widget-border); }
+    .msg-system { background: transparent; border: 1px dashed var(--vscode-widget-border); color: var(--vscode-descriptionForeground); font-size: 12px; max-width: 100%; text-align: center; padding: 12px 16px; }
     .draft-card { margin: 8px 0; padding: 12px; background: var(--vscode-input-background); border: 1px solid var(--vscode-textLink-foreground); border-radius: 6px; font-size: 13px; }
     .draft-card h4 { margin-bottom: 8px; color: var(--vscode-textLink-foreground); }
     .draft-card .field { margin: 4px 0; }
@@ -75,19 +115,37 @@ export class ChatPanel extends WebviewBase {
     .draft-card .value { margin-top: 2px; }
     .draft-card .list-item { margin-left: 12px; }
     .draft-card .list-item::before { content: "- "; }
+    .draft-card .field.changed { border-left: 3px solid var(--vscode-textLink-foreground); padding-left: 8px; }
     .draft-actions { margin-top: 10px; display: flex; gap: 8px; }
     .draft-actions button { padding: 6px 14px; border: none; cursor: pointer; font-size: 12px; border-radius: 4px; }
-    .btn-confirm { background: #4caf50; color: white; }
+    .btn-confirm, .btn-create { background: #4caf50; color: white; }
     .btn-edit { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
-    .btn-cancel { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+    .btn-cancel, .btn-dismiss { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
     .btn-accept { background: #4caf50; color: white; font-size: 14px; padding: 10px 20px; }
+    .btn-accept-cancel { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); font-size: 14px; padding: 10px 20px; }
     #draft-state-section { margin: 0 16px; }
     #draft-state-section summary { cursor: pointer; font-weight: bold; padding: 8px 0; color: var(--vscode-textLink-foreground); }
+    .draft-hint { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 4px; font-style: italic; }
+    .suggested-tasks { margin-top: 8px; }
+    .suggested-tasks h5 { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+    .suggested-task-item { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+    .suggested-task-item .dismiss-btn { background: none; border: none; color: var(--vscode-descriptionForeground); cursor: pointer; font-size: 14px; padding: 2px 6px; }
+    .suggested-task-item .dismiss-btn:hover { color: var(--vscode-errorForeground); }
+    #confirm-section { display: none; margin-top: 8px; padding: 12px; background: var(--vscode-input-background); border: 1px solid var(--vscode-textLink-foreground); border-radius: 6px; }
+    #confirm-section .confirm-text { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 10px; }
+    .edit-field { margin: 6px 0; }
+    .edit-field input, .edit-field select { width: 100%; padding: 4px 8px; margin-top: 2px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); font-family: inherit; font-size: 13px; }
+    .edit-field textarea { width: 100%; padding: 4px 8px; margin-top: 2px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); font-family: inherit; font-size: 13px; min-height: 60px; resize: vertical; }
     #input-area { padding: 12px 16px; border-top: 1px solid var(--vscode-widget-border); display: flex; gap: 8px; }
     #input-area textarea { flex: 1; padding: 8px; border: 1px solid var(--vscode-input-border); background: var(--vscode-input-background); color: var(--vscode-input-foreground); font-family: inherit; font-size: 13px; resize: none; border-radius: 4px; min-height: 40px; max-height: 120px; }
     #input-area button { padding: 8px 16px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; cursor: pointer; border-radius: 4px; font-size: 13px; align-self: flex-end; }
     #input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
     .sending-indicator { text-align: center; padding: 8px; font-size: 12px; color: var(--vscode-descriptionForeground); }
+    .card-error { color: var(--vscode-errorForeground); font-size: 12px; margin-top: 4px; }
+    .delta-op { padding: 4px 8px; margin: 2px 0; font-size: 12px; border-left: 3px solid var(--vscode-textLink-foreground); }
+    .delta-op.op-add { border-left-color: #4caf50; }
+    .delta-op.op-remove { border-left-color: #f44336; }
+    .delta-op.op-set { border-left-color: #2196f3; }
   </style>
 </head>
 <body>
@@ -96,8 +154,17 @@ export class ChatPanel extends WebviewBase {
     <details open>
       <summary>Draft Project State</summary>
       <div id="draft-state-content" class="draft-card"></div>
-      <div style="padding:8px 0">
+      <div id="suggested-tasks-area"></div>
+      <div id="draft-hint-area"></div>
+      <div id="accept-area" style="padding:8px 0">
         <button class="btn-accept" id="accept-draft" style="display:none">Accept Draft State</button>
+      </div>
+      <div id="confirm-section">
+        <div class="confirm-text">This will become your project's canonical state (v1). You can edit it later in the State Panel.</div>
+        <div class="draft-actions">
+          <button class="btn-accept" id="confirm-accept">Confirm</button>
+          <button class="btn-accept-cancel" id="cancel-accept">Cancel</button>
+        </div>
       </div>
     </details>
   </div>
@@ -110,6 +177,7 @@ export class ChatPanel extends WebviewBase {
   <script>
     const vscode = acquireVsCodeApi();
     let currentMode = 'kickoff';
+    let previousDraftState = null;
 
     const messagesEl = document.getElementById('messages');
     const inputEl = document.getElementById('input');
@@ -117,7 +185,19 @@ export class ChatPanel extends WebviewBase {
     const modeBar = document.getElementById('mode-bar');
     const draftSection = document.getElementById('draft-state-section');
     const draftContent = document.getElementById('draft-state-content');
+    const suggestedTasksArea = document.getElementById('suggested-tasks-area');
+    const draftHintArea = document.getElementById('draft-hint-area');
     const acceptBtn = document.getElementById('accept-draft');
+    const confirmSection = document.getElementById('confirm-section');
+    const confirmAcceptBtn = document.getElementById('confirm-accept');
+    const cancelAcceptBtn = document.getElementById('cancel-accept');
+
+    function renderSystemMessage(text) {
+      const div = document.createElement('div');
+      div.className = 'msg msg-system';
+      div.textContent = text;
+      messagesEl.appendChild(div);
+    }
 
     function renderMessage(msg) {
       const div = document.createElement('div');
@@ -126,41 +206,128 @@ export class ChatPanel extends WebviewBase {
       messagesEl.appendChild(div);
 
       if (msg.draftTask) {
-        renderDraftTaskCard(msg.draftTask, messagesEl);
+        renderDraftTaskCard(msg.draftTask, messagesEl, 'steering');
+      }
+      if (msg.draftTasks && msg.draftTasks.length > 0) {
+        msg.draftTasks.forEach(function(task) {
+          renderDraftTaskCard(task, messagesEl, 'steering');
+        });
+      }
+      if (msg.draftDelta && msg.draftDelta.length > 0) {
+        renderDeltaCard(msg.draftDelta, messagesEl);
       }
     }
 
-    function renderDraftTaskCard(task, parent) {
+    function renderDeltaCard(operations, parent) {
+      var card = document.createElement('div');
+      card.className = 'draft-card';
+      var opsHtml = '<h4>Proposed State Changes</h4>';
+      operations.forEach(function(op) {
+        var isAdd = op.type.startsWith('add_');
+        var isRemove = op.type.startsWith('remove_');
+        var cls = isAdd ? 'op-add' : isRemove ? 'op-remove' : 'op-set';
+        var prefix = isAdd ? '+' : isRemove ? '\u2212' : '=';
+        var label = op.type.replace(/_/g, ' ');
+        var val = op.value || op.path || '';
+        opsHtml += '<div class="delta-op ' + cls + '">' + prefix + ' ' + esc(label) + ': ' + esc(val) + '</div>';
+      });
+      opsHtml += '<div class="draft-actions"><button class="btn-confirm" data-action="review-delta">Send to Review</button></div>';
+      card.innerHTML = opsHtml;
+      card.querySelector('[data-action="review-delta"]').addEventListener('click', function() {
+        vscode.postMessage({ type: 'reviewDelta', operations: operations });
+        var btn = card.querySelector('[data-action="review-delta"]');
+        btn.textContent = 'Sent to Review';
+        btn.disabled = true;
+      });
+      parent.appendChild(card);
+    }
+
+    function renderDraftTaskCard(task, parent, mode) {
       const card = document.createElement('div');
       card.className = 'draft-card';
+      renderCardReadOnly(card, task, mode);
+      parent.appendChild(card);
+    }
+
+    function renderCardReadOnly(card, task, mode) {
+      const isPostAccept = mode === 'post-accept';
+      const confirmLabel = isPostAccept ? 'Create' : 'Confirm';
+      const cancelLabel = isPostAccept ? 'Dismiss' : 'Cancel';
+      const confirmClass = isPostAccept ? 'btn-create' : 'btn-confirm';
+      const cancelClass = isPostAccept ? 'btn-dismiss' : 'btn-cancel';
+
       card.innerHTML =
-        '<h4>Draft Task</h4>' +
+        '<h4>' + (isPostAccept ? 'Suggested Task' : 'Draft Task') + '</h4>' +
         '<div class="field"><span class="label">Title</span><div class="value">' + esc(task.title) + '</div></div>' +
         '<div class="field"><span class="label">Type</span><div class="value">' + esc(task.taskType) + '</div></div>' +
         '<div class="field"><span class="label">Goal</span><div class="value">' + esc(task.goal) + '</div></div>' +
         '<div class="field"><span class="label">Scope</span><div class="value">' + (task.scopePaths.length ? esc(task.scopePaths.join(', ')) : '(entire project)') + '</div></div>' +
         '<div class="draft-actions">' +
-          '<button class="btn-confirm" data-action="confirm-task">Confirm</button>' +
+          '<button class="' + confirmClass + '" data-action="confirm-task">' + confirmLabel + '</button>' +
           '<button class="btn-edit" data-action="edit-task">Edit</button>' +
-          '<button class="btn-cancel" data-action="cancel-task">Cancel</button>' +
+          '<button class="' + cancelClass + '" data-action="cancel-task">' + cancelLabel + '</button>' +
         '</div>';
 
       card.querySelector('[data-action="confirm-task"]').addEventListener('click', () => {
         vscode.postMessage({ type: 'confirmTask', task: task });
-        card.innerHTML = '<div style="color:var(--vscode-descriptionForeground);font-size:12px">Task created.</div>';
+        const btns = card.querySelector('.draft-actions');
+        if (btns) btns.remove();
+        const indicator = document.createElement('div');
+        indicator.className = 'sending-indicator';
+        indicator.textContent = 'Creating task...';
+        indicator.setAttribute('data-pending', 'true');
+        card.appendChild(indicator);
       });
       card.querySelector('[data-action="edit-task"]').addEventListener('click', () => {
-        vscode.postMessage({ type: 'editTask', task: task });
-        card.innerHTML = '<div style="color:var(--vscode-descriptionForeground);font-size:12px">Opening editor...</div>';
+        renderCardEditing(card, task, mode);
       });
       card.querySelector('[data-action="cancel-task"]').addEventListener('click', () => {
+        if (isPostAccept && task.suggestionId) {
+          vscode.postMessage({ type: 'dismissPendingTask', suggestionId: task.suggestionId });
+        }
         card.remove();
       });
-
-      parent.appendChild(card);
     }
 
-    function renderDraftState(draft) {
+    function renderCardEditing(card, task, mode) {
+      card.innerHTML =
+        '<h4>Edit Task</h4>' +
+        '<div class="edit-field"><span class="label">Title</span><input type="text" data-field="title" value="' + escAttr(task.title) + '" /></div>' +
+        '<div class="edit-field"><span class="label">Type</span><select data-field="taskType">' +
+          '<option value="discovery"' + (task.taskType === 'discovery' ? ' selected' : '') + '>discovery</option>' +
+          '<option value="implementation"' + (task.taskType === 'implementation' ? ' selected' : '') + '>implementation</option>' +
+          '<option value="validation"' + (task.taskType === 'validation' ? ' selected' : '') + '>validation</option>' +
+        '</select></div>' +
+        '<div class="edit-field"><span class="label">Goal</span><textarea data-field="goal">' + esc(task.goal) + '</textarea></div>' +
+        '<div class="edit-field"><span class="label">Scope (comma-separated)</span><input type="text" data-field="scopePaths" value="' + escAttr(task.scopePaths.join(', ')) + '" /></div>' +
+        '<div class="draft-actions">' +
+          '<button class="btn-confirm" data-action="save-task">Save</button>' +
+          '<button class="btn-cancel" data-action="cancel-edit">Cancel</button>' +
+        '</div>';
+
+      card.querySelector('[data-action="save-task"]').addEventListener('click', () => {
+        const edited = {
+          title: card.querySelector('[data-field="title"]').value.trim() || task.title,
+          goal: card.querySelector('[data-field="goal"]').value.trim() || task.goal,
+          taskType: card.querySelector('[data-field="taskType"]').value,
+          scopePaths: card.querySelector('[data-field="scopePaths"]').value.split(',').map(s => s.trim()).filter(Boolean),
+          suggestionId: task.suggestionId || undefined,
+        };
+        vscode.postMessage({ type: 'confirmTask', task: edited });
+        const btns = card.querySelector('.draft-actions');
+        if (btns) btns.remove();
+        const indicator = document.createElement('div');
+        indicator.className = 'sending-indicator';
+        indicator.textContent = 'Creating task...';
+        indicator.setAttribute('data-pending', 'true');
+        card.appendChild(indicator);
+      });
+      card.querySelector('[data-action="cancel-edit"]').addEventListener('click', () => {
+        renderCardReadOnly(card, task, mode);
+      });
+    }
+
+    function renderDraftState(draft, prevDraft) {
       if (!draft) {
         draftSection.style.display = 'none';
         acceptBtn.style.display = 'none';
@@ -168,35 +335,86 @@ export class ChatPanel extends WebviewBase {
       }
       draftSection.style.display = '';
 
+      const changed = (field) => {
+        if (!prevDraft) return !!draft[field];
+        const cur = draft[field];
+        const prev = prevDraft[field];
+        if (cur === prev) return false;
+        if (Array.isArray(cur) && Array.isArray(prev)) return JSON.stringify(cur) !== JSON.stringify(prev);
+        return cur !== prev;
+      };
+
       let html = '';
-      if (draft.goal) html += '<div class="field"><span class="label">Goal</span><div class="value">' + esc(draft.goal) + '</div></div>';
-      if (draft.phase) html += '<div class="field"><span class="label">Phase</span><div class="value">' + esc(draft.phase) + '</div></div>';
-      if (draft.phaseGoal) html += '<div class="field"><span class="label">Phase Goal</span><div class="value">' + esc(draft.phaseGoal) + '</div></div>';
+      const cls = (field) => changed(field) ? 'field changed' : 'field';
+
+      if (draft.goal) html += '<div class="' + cls('goal') + '"><span class="label">Goal</span><div class="value">' + esc(draft.goal) + '</div></div>';
+      if (draft.phase) html += '<div class="' + cls('phase') + '"><span class="label">Phase</span><div class="value">' + esc(draft.phase) + '</div></div>';
+      if (draft.phaseGoal) html += '<div class="' + cls('phaseGoal') + '"><span class="label">Phase Goal</span><div class="value">' + esc(draft.phaseGoal) + '</div></div>';
       if (draft.constraints && draft.constraints.length) {
-        html += '<div class="field"><span class="label">Constraints</span>';
+        html += '<div class="' + cls('constraints') + '"><span class="label">Constraints</span>';
         draft.constraints.forEach(c => { html += '<div class="list-item">' + esc(c) + '</div>'; });
         html += '</div>';
       }
       if (draft.decisions && draft.decisions.length) {
-        html += '<div class="field"><span class="label">Decisions</span>';
+        html += '<div class="' + cls('decisions') + '"><span class="label">Decisions</span>';
         draft.decisions.forEach(d => { html += '<div class="list-item">' + esc(d) + '</div>'; });
         html += '</div>';
       }
       if (draft.risks && draft.risks.length) {
-        html += '<div class="field"><span class="label">Risks</span>';
+        html += '<div class="' + cls('risks') + '"><span class="label">Risks</span>';
         draft.risks.forEach(r => { html += '<div class="list-item">' + esc(r) + '</div>'; });
         html += '</div>';
       }
-      if (draft.nextStep) html += '<div class="field"><span class="label">Next Step</span><div class="value">' + esc(draft.nextStep) + '</div></div>';
+      if (draft.nextStep) html += '<div class="' + cls('nextStep') + '"><span class="label">Next Step</span><div class="value">' + esc(draft.nextStep) + '</div></div>';
 
       draftContent.innerHTML = html || '<div style="color:var(--vscode-descriptionForeground)">Describe your project to start building the draft...</div>';
+
+      // Missing-goal hint
+      if (!draft.goal && (draft.phase || (draft.constraints && draft.constraints.length))) {
+        draftHintArea.innerHTML = '<div class="draft-hint">Set a project goal to enable acceptance. Try: "The goal is to build..."</div>';
+      } else {
+        draftHintArea.innerHTML = '';
+      }
+
       acceptBtn.style.display = draft.goal ? '' : 'none';
+      confirmSection.style.display = 'none';
+
+      previousDraftState = JSON.parse(JSON.stringify(draft));
+    }
+
+    function renderSuggestedTasks(tasks) {
+      if (!tasks || tasks.length === 0) {
+        suggestedTasksArea.innerHTML = '';
+        return;
+      }
+      let html = '<div class="suggested-tasks"><h5>Suggested starter tasks:</h5>';
+      tasks.forEach((t, i) => {
+        html += '<div class="suggested-task-item">' +
+          '<span>' + (i + 1) + '. "' + esc(t.title) + '" [' + esc(t.taskType) + ']' +
+            (t.scopePaths.length ? ' \\u2014 ' + esc(t.scopePaths.join(', ')) : '') +
+          '</span>' +
+          '<button class="dismiss-btn" data-dismiss-idx="' + i + '" title="Dismiss">\\u00d7</button>' +
+        '</div>';
+      });
+      html += '</div>';
+      suggestedTasksArea.innerHTML = html;
+
+      suggestedTasksArea.querySelectorAll('[data-dismiss-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.getAttribute('data-dismiss-idx'));
+          vscode.postMessage({ type: 'dismissSuggestedTask', index: idx });
+        });
+      });
     }
 
     function esc(s) {
       const d = document.createElement('div');
       d.textContent = s;
       return d.innerHTML;
+    }
+
+    function escAttr(s) {
+      return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
     function scrollToBottom() {
@@ -206,7 +424,7 @@ export class ChatPanel extends WebviewBase {
     function setSending(sending) {
       sendBtn.disabled = sending;
       inputEl.disabled = sending;
-      const existing = messagesEl.querySelector('.sending-indicator');
+      const existing = messagesEl.querySelector('.sending-indicator:not([data-pending])');
       if (sending && !existing) {
         const el = document.createElement('div');
         el.className = 'sending-indicator';
@@ -218,7 +436,7 @@ export class ChatPanel extends WebviewBase {
       }
     }
 
-    // Handle init
+    // Handle messages from extension
     window.addEventListener('message', event => {
       const msg = event.data;
       if (msg.type === 'init') {
@@ -226,14 +444,34 @@ export class ChatPanel extends WebviewBase {
         modeBar.textContent = msg.mode === 'kickoff' ? 'Setting up project...' : 'Project Chat';
         inputEl.placeholder = msg.mode === 'kickoff' ? 'Describe your project...' : 'Create tasks, ask questions...';
         messagesEl.innerHTML = '';
+
+        // Welcome message
+        if (msg.messages.length === 0) {
+          if (msg.mode === 'kickoff') {
+            renderSystemMessage('Welcome to Morticus. Describe the project you want to build \\u2014 what it does, any constraints, and what the first focus should be.\\n\\nExample: "I want to build a chess engine in Rust. Start with board representation, then move generation. Must support FEN notation."\\n\\nI\\'ll draft your project\\'s canonical state from the conversation. You can refine it across multiple messages before accepting.');
+          } else {
+            renderSystemMessage('Project: ' + (msg.goalSummary || 'Active project') + '\\n\\nYou can create tasks ("create a task to implement auth"), ask questions about the project, or request strategic advice.');
+          }
+        }
+
         for (const m of msg.messages) renderMessage(m);
-        if (msg.mode === 'kickoff') renderDraftState(msg.draftState);
+        if (msg.mode === 'kickoff') {
+          renderDraftState(msg.draftState, null);
+          renderSuggestedTasks(msg.draftTasks);
+        }
+        // Re-render pending suggested tasks on reopen in steering mode
+        if (msg.mode === 'steering' && msg.pendingSuggestedTasks && msg.pendingSuggestedTasks.length > 0) {
+          msg.pendingSuggestedTasks.forEach(function(task) {
+            renderDraftTaskCard(task, messagesEl, 'post-accept');
+          });
+        }
         scrollToBottom();
       }
       if (msg.type === 'assistantMessage') {
         setSending(false);
         renderMessage(msg.message);
-        if (msg.draftState !== undefined) renderDraftState(msg.draftState);
+        if (msg.draftState !== undefined) renderDraftState(msg.draftState, previousDraftState);
+        if (msg.draftTasks !== undefined) renderSuggestedTasks(msg.draftTasks);
         scrollToBottom();
       }
       if (msg.type === 'modeChanged') {
@@ -241,6 +479,48 @@ export class ChatPanel extends WebviewBase {
         modeBar.textContent = msg.mode === 'kickoff' ? 'Setting up project...' : 'Project Chat';
         inputEl.placeholder = msg.mode === 'kickoff' ? 'Describe your project...' : 'Create tasks, ask questions...';
         draftSection.style.display = 'none';
+      }
+      if (msg.type === 'postAcceptTasks') {
+        msg.tasks.forEach(task => {
+          renderDraftTaskCard(task, messagesEl, 'post-accept');
+        });
+        scrollToBottom();
+      }
+      if (msg.type === 'systemMessage') {
+        renderSystemMessage(msg.text);
+        scrollToBottom();
+      }
+      if (msg.type === 'taskCreated') {
+        const cards = messagesEl.querySelectorAll('.draft-card');
+        for (const card of cards) {
+          const pending = card.querySelector('[data-pending="true"]');
+          if (pending) {
+            pending.remove();
+            const done = document.createElement('div');
+            done.style.cssText = 'color:var(--vscode-descriptionForeground);font-size:12px;margin-top:4px';
+            done.textContent = 'Task "' + msg.title + '" created (' + msg.taskId + '). Compile its spec when ready.';
+            card.appendChild(done);
+            break;
+          }
+        }
+        scrollToBottom();
+      }
+      if (msg.type === 'taskCreateFailed') {
+        const cards = messagesEl.querySelectorAll('.draft-card');
+        for (const card of cards) {
+          const pending = card.querySelector('[data-pending="true"]');
+          if (pending) {
+            pending.remove();
+            const err = document.createElement('div');
+            err.className = 'card-error';
+            err.textContent = 'Failed to create task: ' + msg.error;
+            card.appendChild(err);
+            break;
+          }
+        }
+      }
+      if (msg.type === 'suggestedTasksUpdated') {
+        renderSuggestedTasks(msg.tasks);
       }
       if (msg.type === 'error') {
         setSending(false);
@@ -262,7 +542,18 @@ export class ChatPanel extends WebviewBase {
     });
 
     acceptBtn.addEventListener('click', () => {
+      acceptBtn.style.display = 'none';
+      confirmSection.style.display = '';
+    });
+
+    confirmAcceptBtn.addEventListener('click', () => {
+      confirmSection.style.display = 'none';
       vscode.postMessage({ type: 'acceptDraftState' });
+    });
+
+    cancelAcceptBtn.addEventListener('click', () => {
+      confirmSection.style.display = 'none';
+      acceptBtn.style.display = '';
     });
 
     function send() {
@@ -283,7 +574,7 @@ export class ChatPanel extends WebviewBase {
   }
 
   protected async onMessage(message: unknown): Promise<void> {
-    const msg = message as { type: string; text?: string; task?: DraftTask };
+    const msg = message as { type: string; text?: string; task?: DraftTask; index?: number; suggestionId?: string; operations?: DeltaOperation[] };
 
     if (msg.type === 'sendMessage' && msg.text) {
       await this.handleSendMessage(msg.text);
@@ -291,8 +582,12 @@ export class ChatPanel extends WebviewBase {
       await this.handleAcceptDraftState();
     } else if (msg.type === 'confirmTask' && msg.task) {
       await this.handleConfirmTask(msg.task);
-    } else if (msg.type === 'editTask' && msg.task) {
-      await this.handleEditTask(msg.task);
+    } else if (msg.type === 'dismissSuggestedTask' && typeof msg.index === 'number') {
+      await this.handleDismissSuggestedTask(msg.index);
+    } else if (msg.type === 'dismissPendingTask' && msg.suggestionId) {
+      await this.handleDismissPendingTask(msg.suggestionId);
+    } else if (msg.type === 'reviewDelta' && msg.operations) {
+      await this.handleReviewDelta(msg.operations);
     }
   }
 
@@ -300,7 +595,6 @@ export class ChatPanel extends WebviewBase {
     if (this.sending || !this.session) return;
     this.sending = true;
 
-    // Add user message to session
     const userMsg: ChatMessage = {
       id: generateChatMessageId(),
       role: 'user',
@@ -311,7 +605,6 @@ export class ChatPanel extends WebviewBase {
     await this.store.chat.save(this.session);
 
     try {
-      // Get current state (null if kickoff)
       let state: CanonicalProjectState | null = null;
       try {
         const current = await this.store.state.getCurrentState();
@@ -320,15 +613,21 @@ export class ChatPanel extends WebviewBase {
 
       const memory = await this.store.memory.get();
 
+      // Build task context for steering mode
+      let taskContext: TaskContext | undefined;
+      if (this.session.mode === 'steering') {
+        taskContext = await this.buildTaskContext();
+      }
+
       const result = await sendChatTurn(
         this.session.messages,
         state,
         memory,
         this.session.mode,
         { workingDirectory: this.workspaceRoot },
+        taskContext,
       );
 
-      // Build assistant message
       const assistantMsg: ChatMessage = {
         id: generateChatMessageId(),
         role: 'assistant',
@@ -336,6 +635,8 @@ export class ChatPanel extends WebviewBase {
         timestamp: new Date().toISOString(),
         draftState: result.draftState,
         draftTask: result.draftTask,
+        draftTasks: result.draftTasks,
+        draftDelta: result.draftDelta,
       };
       this.session.messages.push(assistantMsg);
 
@@ -347,12 +648,21 @@ export class ChatPanel extends WebviewBase {
         );
       }
 
+      // Merge suggested tasks in kickoff mode (merge semantics, not replace)
+      if (this.session.mode === 'kickoff' && result.draftTasks && result.draftTasks.length > 0) {
+        this.session.draftTasks = mergeDraftTasks(
+          this.session.draftTasks,
+          result.draftTasks,
+        );
+      }
+
       await this.store.chat.save(this.session);
 
       this.postMessage({
         type: 'assistantMessage',
         message: assistantMsg,
         draftState: this.session.mode === 'kickoff' ? this.session.currentDraftState : undefined,
+        draftTasks: this.session.mode === 'kickoff' ? this.session.draftTasks : undefined,
       });
     } catch (err) {
       this.postMessage({ type: 'error', error: (err as Error).message });
@@ -371,7 +681,6 @@ export class ChatPanel extends WebviewBase {
     }
 
     try {
-      // Create populated initial state from draft
       const state: CanonicalProjectState = {
         ...createInitialState(),
         goal: draft.goal || '',
@@ -390,15 +699,50 @@ export class ChatPanel extends WebviewBase {
       project.currentStateVersion = state.version;
       await this.store.updateProject(project);
 
+      // Move suggested tasks to pendingSuggestedTasks with stable IDs
+      const suggestedTasks = this.session.draftTasks.map(t => ({
+        ...t,
+        suggestionId: generateSuggestionId(),
+      }));
+
       // Transition chat to steering mode
       this.session.mode = 'steering';
       this.session.currentDraftState = null;
+      this.session.draftTasks = [];
+      this.session.pendingSuggestedTasks = suggestedTasks;
       await this.store.chat.save(this.session);
 
       vscode.commands.executeCommand('setContext', 'morticus.projectInitialized', true);
 
       this.postMessage({ type: 'modeChanged', mode: 'steering' });
-      vscode.window.showInformationMessage(`Project state v1 created. Goal: "${draft.goal}"`);
+
+      // Post-accept system message
+      this.postMessage({
+        type: 'systemMessage',
+        text: 'Project state v1 created. You\'re now in steering mode.\n\nTry: "Create a task to ' +
+          (draft.nextStep || 'get started') + '" or ask "What should we tackle first?"',
+      });
+
+      // Show suggested tasks as cards (not auto-created — user must confirm each)
+      if (suggestedTasks.length > 0) {
+        this.postMessage({
+          type: 'postAcceptTasks',
+          tasks: suggestedTasks,
+        });
+      }
+
+      // Toast with action
+      const taskCountMsg = suggestedTasks.length > 0
+        ? ` Review ${suggestedTasks.length} suggested starter task${suggestedTasks.length > 1 ? 's' : ''} in chat.`
+        : '';
+      const action = await vscode.window.showInformationMessage(
+        `Project state v1 created. Goal: "${draft.goal}"${taskCountMsg}`,
+        'Open State Panel',
+      );
+      if (action === 'Open State Panel') {
+        vscode.commands.executeCommand('morticus.openStatePanel');
+      }
+
       this.onStateAccepted();
 
     } catch (err) {
@@ -423,40 +767,76 @@ export class ChatPanel extends WebviewBase {
       );
       await this.store.tasks.save(task);
 
-      vscode.window.showInformationMessage(`Task "${draft.title}" created.`);
+      // Drain from pendingSuggestedTasks if this was a suggested task
+      if (draft.suggestionId && this.session) {
+        this.session.pendingSuggestedTasks = this.session.pendingSuggestedTasks
+          .filter(t => t.suggestionId !== draft.suggestionId);
+        await this.store.chat.save(this.session);
+      }
+
+      // Non-optimistic: notify webview of success with task ID
+      this.postMessage({
+        type: 'taskCreated',
+        title: draft.title,
+        taskId: task.id,
+      });
+
+      // Toast with action
+      const action = await vscode.window.showInformationMessage(
+        `Task "${draft.title}" created.`,
+        'Open Tasks Panel',
+      );
+      if (action === 'Open Tasks Panel') {
+        vscode.commands.executeCommand('morticus-tasks.focus');
+      }
+
       this.onStateAccepted(); // refresh tree views
     } catch (err) {
+      this.postMessage({
+        type: 'taskCreateFailed',
+        error: (err as Error).message,
+      });
       vscode.window.showErrorMessage(`Failed to create task: ${(err as Error).message}`);
     }
   }
 
-  private async handleEditTask(draft: DraftTask): Promise<void> {
-    // Prefill the existing manual task creation flow
-    const title = await vscode.window.showInputBox({ prompt: 'Task title', value: draft.title });
-    if (title === undefined) return;
+  private async handleDismissSuggestedTask(index: number): Promise<void> {
+    if (!this.session) return;
+    if (index >= 0 && index < this.session.draftTasks.length) {
+      this.session.draftTasks.splice(index, 1);
+      await this.store.chat.save(this.session);
+      this.postMessage({
+        type: 'suggestedTasksUpdated',
+        tasks: this.session.draftTasks,
+      });
+    }
+  }
 
-    const goal = await vscode.window.showInputBox({ prompt: 'Task goal', value: draft.goal });
-    if (goal === undefined) return;
+  private async handleDismissPendingTask(suggestionId: string): Promise<void> {
+    if (!this.session) return;
+    this.session.pendingSuggestedTasks = this.session.pendingSuggestedTasks
+      .filter(t => t.suggestionId !== suggestionId);
+    await this.store.chat.save(this.session);
+  }
 
-    const taskType = await vscode.window.showQuickPick(
-      ['discovery', 'implementation', 'validation'],
-      { placeHolder: 'Task type' },
-    );
-    if (!taskType) return;
+  private async handleReviewDelta(operations: DeltaOperation[]): Promise<void> {
+    try {
+      const currentState = await this.store.state.getCurrentState();
+      const delta = createStateDelta(
+        generateDeltaId(),
+        null,
+        currentState.version,
+        operations,
+      );
+      delta.confidence = 1.0;
+      delta.conflicts = validateDelta(delta, currentState);
+      await this.store.deltas.save(delta);
 
-    const scopeInput = await vscode.window.showInputBox({
-      prompt: 'Scope paths (comma-separated)',
-      value: draft.scopePaths.join(', '),
-    });
-    if (scopeInput === undefined) return;
-
-    const scopePaths = scopeInput ? scopeInput.split(',').map(s => s.trim()).filter(Boolean) : [];
-
-    await this.handleConfirmTask({
-      title: title || draft.title,
-      goal: goal || draft.goal,
-      taskType: taskType as DraftTask['taskType'],
-      scopePaths,
-    });
+      if (this.onDeltaProposed) {
+        await this.onDeltaProposed(delta);
+      }
+    } catch (err) {
+      vscode.window.showErrorMessage(`Failed to create delta: ${(err as Error).message}`);
+    }
   }
 }

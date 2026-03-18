@@ -106,6 +106,34 @@ describe('validator', () => {
     const conflicts = validateDelta(delta, state, spec);
     expect(conflicts).toHaveLength(0);
   });
+
+  it('validates without spec (chat-originated delta) — stale check still runs', () => {
+    const state = applyDeltaOperations(createInitialState(), [], generateDeltaId());
+    // state is v2, delta says v1 → stale
+    const proposed: ProposedDelta = {
+      addConstraints: ['X'], removeConstraints: [], addDecisions: [],
+      removeDecisions: [], addRisks: [], removeRisks: [],
+      addKnownFiles: [], removeKnownFiles: [],
+      setGoal: null, setPhase: null, setNextStep: null,
+    };
+    const delta = buildDelta(proposed, null, 1);
+    const conflicts = validateDelta(delta, state);
+    expect(conflicts.some(c => c.type === 'stale_base_version')).toBe(true);
+  });
+
+  it('validates without spec — no scope checks, clean when version matches', () => {
+    const state = createInitialState();
+    const proposed: ProposedDelta = {
+      addConstraints: ['OK'], removeConstraints: [], addDecisions: [],
+      removeDecisions: [], addRisks: [], removeRisks: [],
+      addKnownFiles: ['lib/outside.ts'], removeKnownFiles: [],
+      setGoal: null, setPhase: null, setNextStep: null,
+    };
+    const delta = buildDelta(proposed, null, 1);
+    // Without spec, file outside any scope should NOT produce a conflict
+    const conflicts = validateDelta(delta, state);
+    expect(conflicts).toHaveLength(0);
+  });
 });
 
 describe('delta-applier', () => {

@@ -8,7 +8,7 @@ import type { TaskSpec } from '../domain/task-spec.js';
 export function validateDelta(
   delta: StateDelta,
   currentState: CanonicalProjectState,
-  spec: TaskSpec,
+  spec?: TaskSpec,
 ): DeltaConflict[] {
   const conflicts: DeltaConflict[] = [];
 
@@ -22,32 +22,36 @@ export function validateDelta(
     });
   }
 
-  // Check: scope violations — removing or adding files outside scope
-  if (spec.scopePaths.length > 0) {
-    for (let i = 0; i < delta.operations.length; i++) {
-      const op = delta.operations[i];
-      if (op.type === 'add_known_file' || op.type === 'remove_known_file') {
-        const filePath = op.type === 'add_known_file' ? op.path : op.path;
-        const inScope = spec.scopePaths.some(sp => filePath.startsWith(sp));
-        if (!inScope) {
-          conflicts.push({
-            severity: 'warning',
-            type: 'scope_violation',
-            description: `File '${filePath}' is outside task scope (${spec.scopePaths.join(', ')})`,
-            operationIndex: i,
-          });
+  // Scope and read-only checks only apply when a task spec is provided.
+  // Chat-originated deltas have no spec — skip these checks.
+  if (spec) {
+    // Check: scope violations — removing or adding files outside scope
+    if (spec.scopePaths.length > 0) {
+      for (let i = 0; i < delta.operations.length; i++) {
+        const op = delta.operations[i];
+        if (op.type === 'add_known_file' || op.type === 'remove_known_file') {
+          const filePath = op.path;
+          const inScope = spec.scopePaths.some(sp => filePath.startsWith(sp));
+          if (!inScope) {
+            conflicts.push({
+              severity: 'warning',
+              type: 'scope_violation',
+              description: `File '${filePath}' is outside task scope (${spec.scopePaths.join(', ')})`,
+              operationIndex: i,
+            });
+          }
         }
       }
     }
-  }
 
-  // Check: read-only task trying to make substantive changes
-  if (spec.writePermissions.length === 0) {
-    for (let i = 0; i < delta.operations.length; i++) {
-      const op = delta.operations[i];
-      if (op.type === 'add_known_file' || op.type === 'remove_known_file') {
-        // File map changes from a read-only task are fine (it's just noting what exists)
-        continue;
+    // Check: read-only task trying to make substantive changes
+    if (spec.writePermissions.length === 0) {
+      for (let i = 0; i < delta.operations.length; i++) {
+        const op = delta.operations[i];
+        if (op.type === 'add_known_file' || op.type === 'remove_known_file') {
+          // File map changes from a read-only task are fine (it's just noting what exists)
+          continue;
+        }
       }
     }
   }

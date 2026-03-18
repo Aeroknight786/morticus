@@ -28,7 +28,9 @@ export function resolveTaskSpec(
   // in the prompt — they are exploring, not constrained by prior choices.
   const defaultPackOptions: Partial<ContextPackOptions> =
     task.taskType === 'discovery'
-      ? { includeDecisions: false, includeRisks: false }
+      ? { includeDecisions: false, includeRisks: false, excludeCategories: ['test_convention'] }
+      : task.taskType === 'validation'
+      ? { excludeCategories: ['domain_glossary'] }
       : {};
 
   const contextPack = buildContextPack(state, memory, task, {

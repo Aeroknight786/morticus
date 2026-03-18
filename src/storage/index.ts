@@ -6,3 +6,5 @@ export { MemoryStore } from './memory-store.js';
 export { SpecStore } from './spec-store.js';
 export { RunStore } from './run-store.js';
 export { ChatStore } from './chat-store.js';
+export { runMigrations, runMigrationsWithSteps, getMigrationSteps, CURRENT_SCHEMA_VERSION } from './migrator.js';
+export type { MigrationStep } from './migrator.js';

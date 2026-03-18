@@ -147,12 +147,14 @@ export class ReviewPanel extends WebviewBase {
         // Auto-extract knowledge from accepted decisions
         let extractedCount = 0;
         if (this.delta.operations.length > 0) {
-          let taskTitle = 'Unknown task';
-          try {
-            const task = await this.store.tasks.get(this.delta.taskId);
-            taskTitle = task.title;
-          } catch {
-            // Task may have been deleted; use fallback title
+          let taskTitle = 'Chat proposal';
+          if (this.delta.taskId) {
+            try {
+              const task = await this.store.tasks.get(this.delta.taskId);
+              taskTitle = task.title;
+            } catch {
+              // Task may have been deleted; use fallback title
+            }
           }
           const latestRunId = null; // RunId is on the task, not the delta
           const candidates = extractKnowledge(

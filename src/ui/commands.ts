@@ -403,7 +403,12 @@ export function registerCommands(
   context.subscriptions.push(
     vscode.commands.registerCommand('morticus.openChat', async () => {
       if (!chatPanel) {
-        chatPanel = new ChatPanel(context.extensionUri, store, workspaceRoot, refreshAll);
+        chatPanel = new ChatPanel(context.extensionUri, store, workspaceRoot, refreshAll, async (delta) => {
+          if (!reviewPanel) {
+            reviewPanel = new ReviewPanel(context.extensionUri, store, refreshAll);
+          }
+          await reviewPanel.showDelta(delta);
+        });
       }
       await chatPanel.showChat();
     }),

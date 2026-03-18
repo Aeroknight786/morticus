@@ -56,3 +56,8 @@ export function generateChatSessionId(): ChatSessionId {
 export function generateChatMessageId(): ChatMessageId {
   return makeId('msg') as ChatMessageId;
 }
+
+// Non-branded ID for suggested task lifecycle tracking.
+export function generateSuggestionId(): string {
+  return makeId('sug');
+}
