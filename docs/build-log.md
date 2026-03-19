@@ -340,3 +340,208 @@ Two independent infrastructure slices addressing storage durability and context 
 - 248 total tests, all passing (<1s)
 - Build: 157KB, 11ms
 - Lint: clean
+
+---
+
+## 2026-03-19: Phase 6 — Chat as Coherent Home Surface
+
+**Problem**: UX fragmentation — 4 tree views, 7 webview panels, 14 commands, and a task lifecycle requiring 4 separate manual clicks (Create → Compile → Run → Review). Chat panel was a dead end after review.
+
+**What was built**:
+
+1. **Project snapshot in chat** (WS1): Compact always-visible state summary at the top of steering mode — goal, phase, next step, active/review task counts, state version. `buildProjectSnapshot()` reads current state + task list. Included in init message and refreshable via `refreshSnapshot()`.
+
+2. **Create & Run flow** (WS2): One-click task lifecycle from chat. "Create & Run" button on every task card (alongside existing "Create Draft") triggers: create task → compile spec → run via RunController → open review panel. Progress indicators update in real-time ("Compiling spec...", "Running task...", "Run complete — review ready (confidence: 85%)").
+
+3. **Post-review routing** (WS3): `onReviewComplete` callback on ReviewPanel fires after accept/reject with outcome details (decision, new version, summary, task title). `createReviewPanel` helper in commands.ts routes outcomes back to chat as system messages ("State updated to v2. 3 operations applied.") and refreshes the snapshot.
+
+4. **Kickoff completeness cues** (WS4): `renderCompleteness()` shows warn/hint/note indicators below draft state fields (missing goal = warning, no phase = hint, no constraints = note). Accept button shows dynamic summary text ("Accept Draft State (goal set, phase set, 3 constraints)").
+
+### Files changed
+
+| File | Changes |
+|---|---|
+| `src/domain/chat.ts` | `ProjectSnapshot` interface (added in prior session) |
+| `src/ui/webviews/chat-panel.ts` | Snapshot UI (CSS/HTML/JS/TS), dual task buttons, `handleConfirmAndRunTask`, completeness cues, `postSystemMessage`/`refreshSnapshot` public methods, `onRunComplete` constructor param |
+| `src/ui/webviews/review-panel.ts` | `onReviewComplete` callback, taskTitle lookup in reject path |
+| `src/ui/commands.ts` | `createReviewPanel` helper with review→chat routing, `onRunComplete` callback wiring |
+
+### Validation
+
+- 248 tests, all passing (<1s)
+- Build: 166KB, 65ms
+- Lint: clean
+
+---
+
+## 2026-03-19: Phase 4B.3 — Chat-Driven Phase Transitions
+
+**Problem**: Users could update individual state fields from chat (4B.2), but phase transitions — moving from "design" to "implementation" — had no dedicated guidance. Claude would only set the phase name without composing a complete transition (new goal, cleared old criteria, new criteria, next step). Additionally, clearing exit criteria required N individual `remove_phase_exit_criterion` operations with exact text matching.
+
+**What was built**:
+
+1. **`clear_phase_exit_criteria` delta operation**: New valueless operation type that resets `phaseExitCriteria` to `[]`. Added to `DeltaOperation` union, `applyDeltaOperations`, `sanitizeDeltaOperation` (valueless path), `VALID_DELTA_TYPES`, and the steering output contract.
+
+2. **Steering prompt phase transition guidance**: Dedicated instruction block teaching Claude to compose complete phase transitions (set_phase + set_phase_goal + clear_phase_exit_criteria + add_phase_exit_criterion + set_next_step). Also instructs Claude to consider suggesting phase transitions when exit criteria appear met during "what to do next" analysis.
+
+3. **Delta card rendering fix**: Both chat-panel.ts and review-panel.ts now handle valueless operations cleanly (no trailing colon/space for `clear_phase_exit_criteria`).
+
+### Files changed
+
+| File | Changes |
+|---|---|
+| `src/domain/state-delta.ts` | +`clear_phase_exit_criteria` to DeltaOperation union |
+| `src/domain/canonical-state.ts` | +case in applyDeltaOperations |
+| `src/runtime/chat-adapter.ts` | +VALID_DELTA_TYPES, +sanitizer valueless path, +output contract text, +steering prompt phase transition guidance |
+| `src/ui/webviews/chat-panel.ts` | Delta card renders valueless ops cleanly |
+| `src/ui/webviews/review-panel.ts` | Review panel renders valueless ops cleanly |
+
+### Validation
+
+- 6 new tests (phase-fields: 3, chat-adapter sanitizer: 2, draftDelta parsing: 1)
+- 254 total tests, all passing (<1s)
+- Build: 167KB, 53ms
+- Lint: clean
+
+---
+
+## 2026-03-19: Phase 4B (Remaining) + 4C — Chat Intelligence & Task Workspace
+
+### What was built
+
+Four workstreams completing the chat intelligence features and adding a task workspace panel:
+
+**WS1: Memory Update Proposals from Chat (4B.4)**
+- `DraftMemoryEntry` interface in `src/domain/chat.ts` with category, title, content
+- `draftMemory?: DraftMemoryEntry[]` on `ChatTurnResult` and `ChatMessage`
+- `sanitizeDraftMemoryEntry()` in chat-adapter.ts — validates category, requires title+content
+- Parser integration: draftMemory array parsed from structured JSON output
+- Output contract: draftMemory field documented in steering output schema
+- Steering prompt guidance: propose draftMemory for conventions, standards, domain terms
+- Memory card rendering in chat-panel.ts (purple-accented cards with Add/Dismiss)
+- `handleConfirmMemory()` — creates MemoryEntry with origin='user', active=true, reviewed=true
+
+**WS2: Task Detail Panel (4C)**
+- `listByTask(taskId)` on RunStore — filter runs by task
+- New `src/ui/webviews/task-detail-panel.ts` (~160 lines):
+  - Shows task metadata, goal, status badge (color-coded by status)
+  - Compiled spec summary (tools, write permissions, est. tokens, compiled timestamp)
+  - Run history with duration and truncated run ID
+  - Candidate delta display with color-coded operations
+  - Contextual action bar (Compile/Run/Review/Archive/Retry based on status)
+- `morticus.openTaskDetail` command registered in commands.ts
+- Package.json: added command definition
+- Task tree items now click to open the detail panel (command on TreeItem)
+
+**WS3: Deterministic Intent Pre-Classification (4B.5)**
+- New `src/runtime/intent-classifier.ts`:
+  - `classifyIntent(text, mode)` — regex-based classification of simple state/task queries
+  - `generateLocalResponse(intent, state, taskContext)` — formats state fields or task lists
+  - Kickoff mode always delegates to Claude
+  - Handles: goal, phase, nextStep, constraints, decisions, risks, exit criteria, active tasks, awaiting review
+- Integration in chat-panel.ts `handleSendMessage()` — short-circuits before Claude call
+
+**WS4: Transcript Compaction (4B.6)**
+- Enhanced `formatMessages()` in chat-adapter.ts with token budget:
+  - Max 20 messages from the tail (unchanged cap)
+  - 12K token budget with front-trimming
+  - Minimum 6 messages preserved (3 turns of context)
+
+### Key files changed
+
+| File | Changes |
+|---|---|
+| `src/domain/chat.ts` | +DraftMemoryEntry, +draftMemory on ChatTurnResult and ChatMessage |
+| `src/runtime/chat-adapter.ts` | +sanitizeDraftMemoryEntry, +parser, +output contract, +prompt guidance, +formatMessages token budget (exported) |
+| `src/runtime/intent-classifier.ts` | NEW: classifyIntent, generateLocalResponse |
+| `src/ui/webviews/chat-panel.ts` | +memory card rendering, +confirmMemory handler, +intent pre-classification, +draftMemory on assistant message |
+| `src/ui/webviews/task-detail-panel.ts` | NEW: task workspace webview |
+| `src/storage/run-store.ts` | +listByTask() |
+| `src/ui/commands.ts` | +TaskDetailPanel import, +morticus.openTaskDetail command |
+| `src/ui/tree-views/task-tree-provider.ts` | +command on TaskItem click |
+| `package.json` | +openTaskDetail command |
+| `test/unit/runtime/chat-adapter.test.ts` | +memory sanitizer (4), +draftMemory parsing (4), +transcript compaction (4) |
+| `test/unit/runtime/intent-classifier.test.ts` | NEW: 19 tests (classifyIntent + generateLocalResponse) |
+
+### Validation
+
+- 31 new tests (memory: 8, intent classifier: 19, transcript compaction: 4)
+- 285 total tests, all passing (<4s)
+- Build: 185KB, 27ms
+- Lint: clean
+
+---
+
+## 2026-03-19: Phase 5 — Checkpoint + Resume from State
+
+### What was built
+
+**Goal**: Let users go down bad paths without polluting future context. Resume from any prior state version, archive active tasks, and compile fresh context from the chosen snapshot.
+
+**What this is**: checkpoint (named bookmarks on state versions) + resume (repoint current state to any historical version, archiving active tasks). Version history forms a DAG via `parentVersion`.
+
+**What this is NOT**: git-style branching. No named branches, no merge operations, no divergent branch tree UI. That's deferred to Phase 12 (Generation Navigation UI).
+
+1. **Domain types** (`src/domain/canonical-state.ts`, `src/domain/checkpoint.ts`, `src/domain/ids.ts`):
+   - `parentVersion: StateVersion | null` on `CanonicalProjectState` — tracks derivation lineage (which version this state was derived from, not chronological predecessor)
+   - `Checkpoint` interface with id, version, label, createdAt
+   - `CheckpointId` branded type and `generateCheckpointId()`
+
+2. **Storage layer** (`src/storage/state-store.ts`, `src/storage/checkpoint-store.ts`, `src/storage/store.ts`):
+   - `getNextVersion()` — scans version files, returns max+1 (prevents collision after resume)
+   - `setCurrentVersion()` — repoints current.json without creating version file
+   - `parentVersion` added to `VersionSummary`
+   - `CheckpointStore` — simple JSON persistence at `.morticus/checkpoints.json` (list, add, remove)
+   - `ProjectStore` gains `checkpoints` sub-store
+
+3. **Schema migration** (`src/storage/migrator.ts`):
+   - `CURRENT_SCHEMA_VERSION` bumped from 1 to 2
+   - v1→v2 migration step: backfills `parentVersion` on existing state snapshots (null for v1, version-1 for others)
+   - Idempotent: skips snapshots that already have parentVersion
+
+4. **Resume orchestrator** (`src/review/resume-orchestrator.ts`, new):
+   - `resumeFromVersion(store, targetVersion)` — verifies target exists, archives all non-terminal tasks, repoints current version
+   - Returns `ResumeResult` with resumed version and archived task IDs
+   - No UI dependencies — pure orchestration
+
+5. **Version collision fix** (`src/review/delta-applier.ts`, `src/ui/webviews/state-panel.ts`):
+   - Both now use `getNextVersion()` instead of relying on `current.version + 1`
+   - After resuming from v1 when v2-v3 exist, new deltas produce v4 (not v2)
+
+6. **History panel** (`src/ui/webviews/history-panel.ts`):
+   - "Resume from here" button per version (not shown on current)
+   - "Save checkpoint" button per version (not shown if already checkpointed)
+   - Current version badge (green "current" label)
+   - Checkpoint labels displayed next to versions
+   - "resumed from vN" label for non-linear versions (orange accent)
+   - parentVersion-aware diffs (uses actual parent, not always version-1)
+   - `onResume` and `onCheckpoint` callbacks from constructor
+
+7. **Commands** (`src/ui/commands.ts`, `package.json`):
+   - `morticus.resumeFromVersion` — previews affected tasks by name and count, modal confirmation, detailed chat system message with archived task names, snapshot refresh
+   - `morticus.createCheckpoint` — prompts for label, persists to CheckpointStore
+   - History panel wired to both commands via callbacks
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `src/domain/canonical-state.ts` | +parentVersion on interface, createInitialState, applyDeltaOperations |
+| `src/domain/checkpoint.ts` | NEW: Checkpoint interface |
+| `src/domain/ids.ts` | +CheckpointId, +generateCheckpointId |
+| `src/storage/state-store.ts` | +getNextVersion, +setCurrentVersion, +parentVersion on VersionSummary |
+| `src/storage/checkpoint-store.ts` | NEW: CheckpointStore class |
+| `src/storage/store.ts` | +checkpoints sub-store |
+| `src/storage/migrator.ts` | CURRENT_SCHEMA_VERSION=2, +v1→v2 migration |
+| `src/review/resume-orchestrator.ts` | NEW: resumeFromVersion() |
+| `src/review/delta-applier.ts` | Fix: getNextVersion() for safe versioning |
+| `src/ui/webviews/state-panel.ts` | Fix: getNextVersion() for safe versioning |
+| `src/ui/webviews/history-panel.ts` | +resume/checkpoint buttons, current badge, parentVersion diffs |
+| `src/ui/commands.ts` | +resumeFromVersion, +createCheckpoint commands |
+| `package.json` | +2 commands |
+
+### Validation
+
+- Tests cover: parentVersion lineage, getNextVersion/setCurrentVersion, checkpoint CRUD, resume orchestration, schema migration v1→v2, plus integrated corner cases: resume→accept delta→correct version+parentVersion, multiple sequential resumes, checkpoint persistence across resumes, current pointer coherence
+- Build: 194KB
+- Lint: clean

@@ -78,6 +78,46 @@ describe('StateStore roundtrip', () => {
   });
 });
 
+describe('StateStore — getNextVersion and setCurrentVersion', () => {
+  it('getNextVersion returns max+1 from existing version files', async () => {
+    await store.initialize('Next Version Test');
+    // v1 exists from init
+    expect(await store.state.getNextVersion()).toBe(2);
+
+    // Save v2
+    const v1 = await store.state.getCurrentState();
+    const v2 = applyDeltaOperations(v1, [{ type: 'set_goal', value: 'A' }], generateDeltaId());
+    await store.state.saveVersion(v2);
+    expect(await store.state.getNextVersion()).toBe(3);
+  });
+
+  it('setCurrentVersion repoints without creating new version file', async () => {
+    await store.initialize('Set Current Test');
+    const v1 = await store.state.getCurrentState();
+    const v2 = applyDeltaOperations(v1, [{ type: 'set_goal', value: 'A' }], generateDeltaId());
+    await store.state.saveVersion(v2);
+    expect(await store.state.getCurrentVersion()).toBe(2);
+
+    // Repoint to v1
+    await store.state.setCurrentVersion(1);
+    expect(await store.state.getCurrentVersion()).toBe(1);
+    // v2 still exists on disk
+    const v2loaded = await store.state.getVersion(2);
+    expect(v2loaded.goal).toBe('A');
+  });
+
+  it('listVersions includes parentVersion', async () => {
+    await store.initialize('Parent Version Test');
+    const v1 = await store.state.getCurrentState();
+    const v2 = applyDeltaOperations(v1, [{ type: 'set_goal', value: 'B' }], generateDeltaId());
+    await store.state.saveVersion(v2);
+
+    const versions = await store.state.listVersions();
+    expect(versions[0].parentVersion).toBeNull(); // v1
+    expect(versions[1].parentVersion).toBe(1);    // v2
+  });
+});
+
 describe('TaskStore roundtrip', () => {
   it('saves and lists tasks', async () => {
     await store.initialize('Task Test');

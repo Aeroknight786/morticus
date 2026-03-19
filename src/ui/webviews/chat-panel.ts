@@ -1,14 +1,20 @@
 import * as vscode from 'vscode';
 import { WebviewBase } from './webview-base.js';
 import type { ProjectStore } from '../../storage/store.js';
-import type { ChatMessage, DraftCanonicalState, DraftTask, ChatSession, TaskContext } from '../../domain/chat.js';
+import type { ChatMessage, DraftCanonicalState, DraftTask, DraftMemoryEntry, ChatSession, TaskContext, ProjectSnapshot } from '../../domain/chat.js';
 import { createChatSession, mergeDraftState, mergeDraftTasks } from '../../domain/chat.js';
 import { generateChatSessionId, generateChatMessageId, generateTaskId, generateSuggestionId, generateDeltaId } from '../../domain/ids.js';
 import { createStateDelta, type DeltaOperation, type StateDelta } from '../../domain/state-delta.js';
 import { validateDelta } from '../../review/validator.js';
-import { createTask } from '../../domain/task.js';
+import { createTask, transitionTask } from '../../domain/task.js';
 import { createInitialState, type CanonicalProjectState } from '../../domain/canonical-state.js';
 import { sendChatTurn } from '../../runtime/chat-adapter.js';
+import { resolveTaskSpec } from '../../compiler/spec-resolver.js';
+import { RunController } from '../../runtime/index.js';
+import type { NormalizedOutput } from '../../domain/task-run.js';
+import { classifyIntent, generateLocalResponse } from '../../runtime/intent-classifier.js';
+import { generateMemoryEntryId } from '../../domain/ids.js';
+import type { MemoryCategory } from '../../domain/durable-memory.js';
 
 export class ChatPanel extends WebviewBase {
   private session: ChatSession | null = null;
@@ -20,6 +26,7 @@ export class ChatPanel extends WebviewBase {
     private workspaceRoot: string,
     private onStateAccepted: () => void,
     private onDeltaProposed?: (delta: StateDelta) => Promise<void>,
+    private onRunComplete?: (delta: StateDelta, normalized: NormalizedOutput) => Promise<void>,
   ) {
     super(extensionUri, 'morticus.chatPanel', 'Morticus Chat');
   }
@@ -54,8 +61,9 @@ export class ChatPanel extends WebviewBase {
       await this.store.chat.save(this.session);
     }
 
-    // Build goal summary for steering welcome
+    // Build goal summary and snapshot for steering welcome
     let goalSummary = '';
+    let snapshot: ProjectSnapshot | null = null;
     if (this.session.mode === 'steering') {
       try {
         const state = await this.store.state.getCurrentState();
@@ -63,6 +71,7 @@ export class ChatPanel extends WebviewBase {
           goalSummary = state.goal.length > 80 ? state.goal.slice(0, 77) + '...' : state.goal;
         }
       } catch { /* no state yet */ }
+      snapshot = await this.buildProjectSnapshot();
     }
 
     this.postMessage({
@@ -73,6 +82,7 @@ export class ChatPanel extends WebviewBase {
       draftTasks: this.session.draftTasks,
       pendingSuggestedTasks: this.session.pendingSuggestedTasks,
       goalSummary,
+      snapshot,
     });
   }
 
@@ -146,10 +156,21 @@ export class ChatPanel extends WebviewBase {
     .delta-op.op-add { border-left-color: #4caf50; }
     .delta-op.op-remove { border-left-color: #f44336; }
     .delta-op.op-set { border-left-color: #2196f3; }
+    .memory-card { margin: 8px 0; padding: 12px; background: var(--vscode-input-background); border: 1px solid #9c27b0; border-radius: 6px; font-size: 13px; }
+    .memory-card h4 { margin-bottom: 8px; color: #9c27b0; }
+    #project-snapshot { padding: 8px 16px; font-size: 12px; border-bottom: 1px solid var(--vscode-widget-border); display: none; }
+    #project-snapshot .snapshot-grid { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; }
+    #project-snapshot .snapshot-label { color: var(--vscode-descriptionForeground); font-size: 11px; text-transform: uppercase; }
+    #project-snapshot .snapshot-value { font-size: 12px; }
+    .completeness-cue { font-size: 11px; margin: 2px 0; padding: 2px 8px; }
+    .completeness-cue.warn { color: #e6a817; }
+    .completeness-cue.hint { color: var(--vscode-textLink-foreground); }
+    .completeness-cue.note { color: var(--vscode-descriptionForeground); }
   </style>
 </head>
 <body>
   <div id="mode-bar"></div>
+  <div id="project-snapshot"></div>
   <div id="draft-state-section" style="display:none">
     <details open>
       <summary>Draft Project State</summary>
@@ -191,6 +212,28 @@ export class ChatPanel extends WebviewBase {
     const confirmSection = document.getElementById('confirm-section');
     const confirmAcceptBtn = document.getElementById('confirm-accept');
     const cancelAcceptBtn = document.getElementById('cancel-accept');
+    const snapshotEl = document.getElementById('project-snapshot');
+
+    function renderSnapshot(snapshot) {
+      if (!snapshot) { snapshotEl.style.display = 'none'; return; }
+      snapshotEl.style.display = '';
+      snapshotEl.innerHTML =
+        '<div class="snapshot-grid">' +
+        '<span class="snapshot-label">Goal</span><span class="snapshot-value">' + esc(snapshot.goal) + '</span>' +
+        (snapshot.phase ? '<span class="snapshot-label">Phase</span><span class="snapshot-value">' + esc(snapshot.phase) + (snapshot.phaseGoal ? ' \\u2014 ' + esc(snapshot.phaseGoal) : '') + '</span>' : '') +
+        (snapshot.nextStep ? '<span class="snapshot-label">Next</span><span class="snapshot-value">' + esc(snapshot.nextStep) + '</span>' : '') +
+        '<span class="snapshot-label">Status</span><span class="snapshot-value">' + snapshot.activeTaskCount + ' active, ' + snapshot.awaitingReviewCount + ' review \\u2014 v' + snapshot.stateVersion + '</span>' +
+        '</div>';
+    }
+
+    function renderCompleteness(draft) {
+      var cues = [];
+      if (!draft.goal) cues.push({ level: 'warn', text: 'Missing: project goal (required)' });
+      if (!draft.phase) cues.push({ level: 'hint', text: 'Consider setting a phase' });
+      if (!draft.nextStep) cues.push({ level: 'hint', text: 'Consider defining a next step' });
+      if (!draft.constraints || !draft.constraints.length) cues.push({ level: 'note', text: 'No constraints yet' });
+      return cues;
+    }
 
     function renderSystemMessage(text) {
       const div = document.createElement('div');
@@ -216,6 +259,11 @@ export class ChatPanel extends WebviewBase {
       if (msg.draftDelta && msg.draftDelta.length > 0) {
         renderDeltaCard(msg.draftDelta, messagesEl);
       }
+      if (msg.draftMemory && msg.draftMemory.length > 0) {
+        msg.draftMemory.forEach(function(entry) {
+          renderMemoryCard(entry, messagesEl);
+        });
+      }
     }
 
     function renderDeltaCard(operations, parent) {
@@ -229,7 +277,7 @@ export class ChatPanel extends WebviewBase {
         var prefix = isAdd ? '+' : isRemove ? '\u2212' : '=';
         var label = op.type.replace(/_/g, ' ');
         var val = op.value || op.path || '';
-        opsHtml += '<div class="delta-op ' + cls + '">' + prefix + ' ' + esc(label) + ': ' + esc(val) + '</div>';
+        opsHtml += '<div class="delta-op ' + cls + '">' + prefix + ' ' + esc(label) + (val ? ': ' + esc(val) : '') + '</div>';
       });
       opsHtml += '<div class="draft-actions"><button class="btn-confirm" data-action="review-delta">Send to Review</button></div>';
       card.innerHTML = opsHtml;
@@ -238,6 +286,34 @@ export class ChatPanel extends WebviewBase {
         var btn = card.querySelector('[data-action="review-delta"]');
         btn.textContent = 'Sent to Review';
         btn.disabled = true;
+      });
+      parent.appendChild(card);
+    }
+
+    function renderMemoryCard(entry, parent) {
+      var card = document.createElement('div');
+      card.className = 'memory-card';
+      card.innerHTML =
+        '<h4>Proposed Memory Entry</h4>' +
+        '<div class="field"><span class="label">Category</span><div class="value">' + esc(entry.category.replace(/_/g, ' ')) + '</div></div>' +
+        '<div class="field"><span class="label">Title</span><div class="value">' + esc(entry.title) + '</div></div>' +
+        '<div class="field"><span class="label">Content</span><div class="value">' + esc(entry.content) + '</div></div>' +
+        '<div class="draft-actions">' +
+          '<button class="btn-confirm" data-action="confirm-memory" style="background:#9c27b0">Add to Memory</button>' +
+          '<button class="btn-dismiss" data-action="dismiss-memory">Dismiss</button>' +
+        '</div>';
+      card.querySelector('[data-action="confirm-memory"]').addEventListener('click', function() {
+        vscode.postMessage({ type: 'confirmMemory', entry: entry });
+        var btns = card.querySelector('.draft-actions');
+        if (btns) btns.remove();
+        var done = document.createElement('div');
+        done.style.cssText = 'color:var(--vscode-descriptionForeground);font-size:12px;margin-top:4px';
+        done.textContent = 'Adding to memory...';
+        done.setAttribute('data-memory-pending', 'true');
+        card.appendChild(done);
+      });
+      card.querySelector('[data-action="dismiss-memory"]').addEventListener('click', function() {
+        card.remove();
       });
       parent.appendChild(card);
     }
@@ -264,6 +340,7 @@ export class ChatPanel extends WebviewBase {
         '<div class="field"><span class="label">Scope</span><div class="value">' + (task.scopePaths.length ? esc(task.scopePaths.join(', ')) : '(entire project)') + '</div></div>' +
         '<div class="draft-actions">' +
           '<button class="' + confirmClass + '" data-action="confirm-task">' + confirmLabel + '</button>' +
+          '<button class="btn-confirm" data-action="confirm-run-task" style="background:#1976d2">Create & Run</button>' +
           '<button class="btn-edit" data-action="edit-task">Edit</button>' +
           '<button class="' + cancelClass + '" data-action="cancel-task">' + cancelLabel + '</button>' +
         '</div>';
@@ -276,6 +353,16 @@ export class ChatPanel extends WebviewBase {
         indicator.className = 'sending-indicator';
         indicator.textContent = 'Creating task...';
         indicator.setAttribute('data-pending', 'true');
+        card.appendChild(indicator);
+      });
+      card.querySelector('[data-action="confirm-run-task"]').addEventListener('click', () => {
+        vscode.postMessage({ type: 'confirmAndRunTask', task: task });
+        const btns = card.querySelector('.draft-actions');
+        if (btns) btns.remove();
+        const indicator = document.createElement('div');
+        indicator.className = 'sending-indicator';
+        indicator.textContent = 'Creating & running...';
+        indicator.setAttribute('data-task-run', 'true');
         card.appendChild(indicator);
       });
       card.querySelector('[data-action="edit-task"]').addEventListener('click', () => {
@@ -367,6 +454,12 @@ export class ChatPanel extends WebviewBase {
       }
       if (draft.nextStep) html += '<div class="' + cls('nextStep') + '"><span class="label">Next Step</span><div class="value">' + esc(draft.nextStep) + '</div></div>';
 
+      // Completeness cues
+      var cues = renderCompleteness(draft);
+      if (cues.length > 0) {
+        cues.forEach(function(c) { html += '<div class="completeness-cue ' + c.level + '">' + esc(c.text) + '</div>'; });
+      }
+
       draftContent.innerHTML = html || '<div style="color:var(--vscode-descriptionForeground)">Describe your project to start building the draft...</div>';
 
       // Missing-goal hint
@@ -376,6 +469,13 @@ export class ChatPanel extends WebviewBase {
         draftHintArea.innerHTML = '';
       }
 
+      // Dynamic accept button text with summary
+      var parts = [];
+      if (draft.goal) parts.push('goal set');
+      if (draft.phase) parts.push('phase set');
+      if (draft.constraints && draft.constraints.length) parts.push(draft.constraints.length + ' constraint' + (draft.constraints.length > 1 ? 's' : ''));
+      if (draft.decisions && draft.decisions.length) parts.push(draft.decisions.length + ' decision' + (draft.decisions.length > 1 ? 's' : ''));
+      acceptBtn.textContent = parts.length > 0 ? 'Accept Draft State (' + parts.join(', ') + ')' : 'Accept Draft State';
       acceptBtn.style.display = draft.goal ? '' : 'none';
       confirmSection.style.display = 'none';
 
@@ -465,6 +565,7 @@ export class ChatPanel extends WebviewBase {
             renderDraftTaskCard(task, messagesEl, 'post-accept');
           });
         }
+        if (msg.snapshot) renderSnapshot(msg.snapshot);
         scrollToBottom();
       }
       if (msg.type === 'assistantMessage') {
@@ -522,6 +623,50 @@ export class ChatPanel extends WebviewBase {
       if (msg.type === 'suggestedTasksUpdated') {
         renderSuggestedTasks(msg.tasks);
       }
+      if (msg.type === 'projectSnapshot') {
+        renderSnapshot(msg.snapshot);
+      }
+      if (msg.type === 'taskRunProgress') {
+        var cards = messagesEl.querySelectorAll('.draft-card');
+        for (var ci = 0; ci < cards.length; ci++) {
+          var ind = cards[ci].querySelector('[data-task-run="true"]');
+          if (ind) { ind.textContent = msg.text; break; }
+        }
+      }
+      if (msg.type === 'taskRunComplete') {
+        var cards2 = messagesEl.querySelectorAll('.draft-card');
+        for (var cj = 0; cj < cards2.length; cj++) {
+          var ind2 = cards2[cj].querySelector('[data-task-run="true"]');
+          if (ind2) {
+            ind2.textContent = 'Run complete \\u2014 review ready (confidence: ' + msg.confidence + '%)';
+            ind2.removeAttribute('data-task-run');
+            break;
+          }
+        }
+      }
+      if (msg.type === 'memoryAdded') {
+        var memCards = messagesEl.querySelectorAll('.memory-card');
+        for (var mk = 0; mk < memCards.length; mk++) {
+          var mp = memCards[mk].querySelector('[data-memory-pending="true"]');
+          if (mp) {
+            mp.textContent = 'Memory entry "' + msg.title + '" added.';
+            mp.removeAttribute('data-memory-pending');
+            break;
+          }
+        }
+      }
+      if (msg.type === 'memoryAddFailed') {
+        var memCards2 = messagesEl.querySelectorAll('.memory-card');
+        for (var ml = 0; ml < memCards2.length; ml++) {
+          var mp2 = memCards2[ml].querySelector('[data-memory-pending="true"]');
+          if (mp2) {
+            mp2.textContent = 'Failed: ' + msg.error;
+            mp2.style.color = 'var(--vscode-errorForeground)';
+            mp2.removeAttribute('data-memory-pending');
+            break;
+          }
+        }
+      }
       if (msg.type === 'error') {
         setSending(false);
         const div = document.createElement('div');
@@ -574,7 +719,7 @@ export class ChatPanel extends WebviewBase {
   }
 
   protected async onMessage(message: unknown): Promise<void> {
-    const msg = message as { type: string; text?: string; task?: DraftTask; index?: number; suggestionId?: string; operations?: DeltaOperation[] };
+    const msg = message as { type: string; text?: string; task?: DraftTask; index?: number; suggestionId?: string; operations?: DeltaOperation[]; entry?: DraftMemoryEntry };
 
     if (msg.type === 'sendMessage' && msg.text) {
       await this.handleSendMessage(msg.text);
@@ -584,10 +729,14 @@ export class ChatPanel extends WebviewBase {
       await this.handleConfirmTask(msg.task);
     } else if (msg.type === 'dismissSuggestedTask' && typeof msg.index === 'number') {
       await this.handleDismissSuggestedTask(msg.index);
+    } else if (msg.type === 'confirmAndRunTask' && msg.task) {
+      await this.handleConfirmAndRunTask(msg.task);
     } else if (msg.type === 'dismissPendingTask' && msg.suggestionId) {
       await this.handleDismissPendingTask(msg.suggestionId);
     } else if (msg.type === 'reviewDelta' && msg.operations) {
       await this.handleReviewDelta(msg.operations);
+    } else if (msg.type === 'confirmMemory' && msg.entry) {
+      await this.handleConfirmMemory(msg.entry);
     }
   }
 
@@ -610,6 +759,25 @@ export class ChatPanel extends WebviewBase {
         const current = await this.store.state.getCurrentState();
         if (current.goal) state = current;
       } catch { /* no state yet */ }
+
+      // Local intent classification — skip Claude for simple queries
+      const intent = classifyIntent(text, this.session.mode);
+      if (intent.type !== 'delegate') {
+        let taskContext: TaskContext | undefined;
+        if (intent.type === 'task_query') taskContext = await this.buildTaskContext();
+        const localResponse = generateLocalResponse(intent, state, taskContext);
+        const assistantMsg: ChatMessage = {
+          id: generateChatMessageId(),
+          role: 'assistant',
+          content: localResponse,
+          timestamp: new Date().toISOString(),
+        };
+        this.session.messages.push(assistantMsg);
+        await this.store.chat.save(this.session);
+        this.postMessage({ type: 'assistantMessage', message: assistantMsg });
+        this.sending = false;
+        return;
+      }
 
       const memory = await this.store.memory.get();
 
@@ -637,6 +805,7 @@ export class ChatPanel extends WebviewBase {
         draftTask: result.draftTask,
         draftTasks: result.draftTasks,
         draftDelta: result.draftDelta,
+        draftMemory: result.draftMemory,
       };
       this.session.messages.push(assistantMsg);
 
@@ -837,6 +1006,124 @@ export class ChatPanel extends WebviewBase {
       }
     } catch (err) {
       vscode.window.showErrorMessage(`Failed to create delta: ${(err as Error).message}`);
+    }
+  }
+
+  private async handleConfirmMemory(draft: DraftMemoryEntry): Promise<void> {
+    try {
+      const now = new Date().toISOString();
+      await this.store.memory.addEntry({
+        id: generateMemoryEntryId(),
+        category: draft.category as MemoryCategory,
+        title: draft.title,
+        content: draft.content,
+        origin: 'user',
+        active: true,
+        reviewed: true,
+        normalizedValue: null,
+        sourceTaskId: null,
+        sourceRunId: null,
+        sourceDeltaId: null,
+        sourceOperationType: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      this.postMessage({ type: 'memoryAdded', title: draft.title });
+    } catch (err) {
+      this.postMessage({ type: 'memoryAddFailed', error: (err as Error).message });
+    }
+  }
+
+  // --- Phase 6: Public methods for cross-panel communication ---
+
+  public postSystemMessage(text: string): void {
+    this.postMessage({ type: 'systemMessage', text });
+  }
+
+  public async refreshSnapshot(): Promise<void> {
+    const snapshot = await this.buildProjectSnapshot();
+    if (snapshot) {
+      this.postMessage({ type: 'projectSnapshot', snapshot });
+    }
+  }
+
+  private async buildProjectSnapshot(): Promise<ProjectSnapshot | null> {
+    try {
+      const state = await this.store.state.getCurrentState();
+      if (!state.goal) return null;
+      const tasks = await this.store.tasks.list();
+      const activeStatuses = ['draft', 'ready', 'running', 'awaiting_completion', 'normalizing_output'];
+      return {
+        goal: state.goal,
+        phase: state.phase,
+        phaseGoal: state.phaseGoal,
+        nextStep: state.nextStep,
+        stateVersion: state.version,
+        activeTaskCount: tasks.filter(t => activeStatuses.includes(t.status)).length,
+        awaitingReviewCount: tasks.filter(t => t.status === 'awaiting_review').length,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async handleConfirmAndRunTask(draft: DraftTask): Promise<void> {
+    try {
+      // 1. Create task (same logic as handleConfirmTask)
+      const project = await this.store.getProject();
+      const currentVersion = await this.store.state.getCurrentVersion();
+      const readOnly = draft.taskType === 'discovery' || draft.taskType === 'validation';
+
+      const task = createTask(
+        generateTaskId(),
+        project.id,
+        draft.title,
+        draft.goal,
+        draft.taskType,
+        { paths: draft.scopePaths, readOnly, writePermissions: [] },
+        currentVersion,
+      );
+      await this.store.tasks.save(task);
+
+      // Drain from pendingSuggestedTasks if applicable
+      if (draft.suggestionId && this.session) {
+        this.session.pendingSuggestedTasks = this.session.pendingSuggestedTasks
+          .filter(t => t.suggestionId !== draft.suggestionId);
+        await this.store.chat.save(this.session);
+      }
+
+      this.postMessage({ type: 'taskRunProgress', text: 'Compiling spec...' });
+
+      // 2. Compile spec
+      const state = await this.store.state.getCurrentState();
+      const memory = await this.store.memory.get();
+      const spec = resolveTaskSpec(task, state, memory);
+      await this.store.specs.save(spec);
+
+      const readyTask = transitionTask(
+        { ...task, specId: spec.id, updatedAt: new Date().toISOString() },
+        'ready',
+      );
+      await this.store.tasks.save(readyTask);
+
+      this.postMessage({ type: 'taskRunProgress', text: 'Running task...' });
+
+      // 3. Run
+      const controller = new RunController({ store: this.store, workspaceRoot: this.workspaceRoot });
+      const { normalizedOutput, delta } = await controller.execute(readyTask);
+
+      const pct = (normalizedOutput.confidence * 100).toFixed(0);
+      this.postMessage({ type: 'taskRunComplete', confidence: pct });
+
+      // 4. Open review
+      if (this.onRunComplete) {
+        await this.onRunComplete(delta, normalizedOutput);
+      }
+
+      // 5. Refresh trees
+      this.onStateAccepted();
+    } catch (err) {
+      this.postMessage({ type: 'taskRunProgress', text: 'Failed: ' + (err as Error).message });
     }
   }
 }

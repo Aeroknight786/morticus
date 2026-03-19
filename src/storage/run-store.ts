@@ -36,6 +36,11 @@ export class RunStore {
     return runs;
   }
 
+  async listByTask(taskId: string): Promise<TaskRun[]> {
+    const all = await this.list();
+    return all.filter(r => r.taskId === taskId);
+  }
+
   async saveRawOutput(runId: RunId, output: string): Promise<void> {
     const outputPath = path.join(this.runDir(runId), 'output.json');
     await writeJson(outputPath, { output });

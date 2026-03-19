@@ -7,6 +7,7 @@ describe('CanonicalProjectState', () => {
   it('createInitialState returns version 1 with empty fields', () => {
     const state = createInitialState();
     expect(state.version).toBe(1);
+    expect(state.parentVersion).toBeNull();
     expect(state.goal).toBe('');
     expect(state.constraints).toEqual([]);
     expect(state.decisions).toEqual([]);
@@ -15,12 +16,23 @@ describe('CanonicalProjectState', () => {
     expect(state.createdFromDeltaId).toBeNull();
   });
 
-  it('applyDeltaOperations produces incremented version', () => {
+  it('applyDeltaOperations produces incremented version with parentVersion', () => {
     const state = createInitialState();
     const deltaId = generateDeltaId();
     const next = applyDeltaOperations(state, [], deltaId);
     expect(next.version).toBe(2);
+    expect(next.parentVersion).toBe(1);
     expect(next.createdFromDeltaId).toBe(deltaId);
+  });
+
+  it('parentVersion tracks actual parent through non-linear history', () => {
+    const v1 = createInitialState();
+    const v2 = applyDeltaOperations(v1, [{ type: 'set_goal', value: 'A' }], generateDeltaId());
+    const v3 = applyDeltaOperations(v2, [{ type: 'set_phase', value: 'B' }], generateDeltaId());
+    // Simulate resume: apply new delta from v1 (not v3)
+    const v4 = applyDeltaOperations(v1, [{ type: 'set_goal', value: 'C' }], generateDeltaId());
+    expect(v4.parentVersion).toBe(1); // Parent is v1, not v3
+    expect(v4.version).toBe(2); // Pure function doesn't know about gaps — caller overrides
   });
 
   it('applies add operations', () => {

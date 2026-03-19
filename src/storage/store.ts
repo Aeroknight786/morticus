@@ -13,6 +13,7 @@ import { MemoryStore } from './memory-store.js';
 import { SpecStore } from './spec-store.js';
 import { RunStore } from './run-store.js';
 import { ChatStore } from './chat-store.js';
+import { CheckpointStore } from './checkpoint-store.js';
 
 const MORTICUS_DIR = '.morticus';
 const PROJECT_FILE = 'project.json';
@@ -27,6 +28,7 @@ export class ProjectStore {
   readonly specs: SpecStore;
   readonly runs: RunStore;
   readonly chat: ChatStore;
+  readonly checkpoints: CheckpointStore;
   private migrated = false;
 
   constructor(workspacePath: string) {
@@ -39,6 +41,7 @@ export class ProjectStore {
     this.specs = new SpecStore(this.morticusPath);
     this.runs = new RunStore(this.morticusPath);
     this.chat = new ChatStore(this.morticusPath);
+    this.checkpoints = new CheckpointStore(path.join(this.morticusPath, 'checkpoints.json'));
   }
 
   async isInitialized(): Promise<boolean> {

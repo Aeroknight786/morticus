@@ -1,6 +1,6 @@
 import type { CanonicalProjectState } from '../domain/canonical-state.js';
 import type { DurableMemory } from '../domain/durable-memory.js';
-import type { ChatMessage, ChatTurnResult, ChatMode, DraftCanonicalState, DraftTask, TaskContext } from '../domain/chat.js';
+import type { ChatMessage, ChatTurnResult, ChatMode, DraftCanonicalState, DraftTask, DraftMemoryEntry, TaskContext } from '../domain/chat.js';
 import type { DeltaOperation } from '../domain/state-delta.js';
 import { runClaude } from './claude-adapter.js';
 
@@ -64,6 +64,20 @@ Guidelines:
   2. These will go through a review step before being applied — explain what you're proposing
   3. Only include operations the user asked for — don't add extras
   4. For removals, match the exact existing value from the project state
+- If the user wants to transition phases ("let's move to...", "we're done with...", "shift focus to..."):
+  1. Compose a complete phase transition in draftDelta — don't just set the phase name:
+     - set_phase: the new phase name
+     - set_phase_goal: what this phase should accomplish
+     - clear_phase_exit_criteria: reset criteria from the previous phase
+     - add_phase_exit_criterion: 2-4 concrete, verifiable exit criteria for the new phase
+     - set_next_step: the immediate first action in the new phase
+  2. Explain what you're proposing and why — the user will review before it's applied
+  3. Keep exit criteria concrete and verifiable ("all API endpoints have tests") not vague ("code is good")
+- When analyzing priorities or "what to do next", consider whether phase exit criteria appear to be met based on completed tasks. If so, suggest a phase transition alongside or instead of new tasks.
+- If the user shares a project convention, coding standard, domain term, or architectural decision that should persist:
+  1. Propose it as a draftMemory entry with appropriate category
+  2. Keep entries atomic — one concept per entry
+  3. Do not duplicate entries already visible in Project Memory above
 - If the user is just asking a question or chatting → respond conversationally, omit the structured block entirely
 - Keep responses concise and focused`;
 }
@@ -94,7 +108,8 @@ ${CHAT_START_MARKER}
   "draftState": null,
   "draftTask": null,
   "draftTasks": [],
-  "draftDelta": []
+  "draftDelta": [],
+  "draftMemory": []
 }
 ${CHAT_END_MARKER}
 
@@ -102,8 +117,9 @@ Field schemas:
 - draftState (not used in steering mode): set to null
 - draftTask: { "title": "", "goal": "", "taskType": "discovery"|"implementation"|"validation", "scopePaths": [] } — use for direct task creation requests
 - draftTasks: array of same shape — use for strategic "what next" suggestions (0-2 tasks). Use draftTasks (not draftTask) when suggesting strategic priorities.
-- draftDelta: array of state change operations. Each is { "type": "...", "value": "..." }. Valid types: add_constraint, remove_constraint, add_decision, remove_decision, add_risk, remove_risk, set_goal, set_phase, set_next_step, set_phase_goal, add_phase_exit_criterion, remove_phase_exit_criterion. For add_known_file/remove_known_file, use "path" instead of "value".
-- Use draftTask for work that requires execution. Use draftDelta for direct state mutations. Use draftTasks for strategic suggestions.
+- draftDelta: array of state change operations. Each is { "type": "...", "value": "..." }. Valid types: add_constraint, remove_constraint, add_decision, remove_decision, add_risk, remove_risk, set_goal, set_phase, set_next_step, set_phase_goal, add_phase_exit_criterion, remove_phase_exit_criterion, clear_phase_exit_criteria. For add_known_file/remove_known_file, use "path" instead of "value". clear_phase_exit_criteria takes no value (resets exit criteria to empty).
+- draftMemory: array of { "category": "coding_standard"|"architecture_invariant"|"environment_setup"|"domain_glossary"|"workflow_preference"|"test_convention"|"custom", "title": "", "content": "" } — propose durable memory entries for project conventions, rules, or domain knowledge.
+- Use draftTask for work that requires execution. Use draftDelta for direct state mutations. Use draftTasks for strategic suggestions. Use draftMemory for persistent project knowledge.
 - Never use draftDelta and draftTask in the same response.
 - Set unused fields to null`;
 }
@@ -164,10 +180,19 @@ export function buildTaskContextSection(ctx: TaskContext): string {
   return `\n## Project Activity\n${parts.join('\n\n')}`;
 }
 
-function formatMessages(messages: ChatMessage[]): string {
-  // Include recent messages as conversation context (sliding window)
-  const recent = messages.slice(-20);
-  return recent.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
+export function formatMessages(messages: ChatMessage[]): string {
+  const maxMessages = 20;
+  const maxTokens = 12_000;
+  let window = messages.slice(-maxMessages);
+
+  // Trim from the front if over token budget
+  let estimated = window.reduce((sum, m) => sum + Math.ceil(m.content.length / 4), 0);
+  while (estimated > maxTokens && window.length > 6) {
+    window = window.slice(1);
+    estimated = window.reduce((sum, m) => sum + Math.ceil(m.content.length / 4), 0);
+  }
+
+  return window.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
 }
 
 // ── Main entry point ──
@@ -276,6 +301,17 @@ export function parseChatTurnResult(raw: string): ChatTurnResult {
       }
     }
 
+    // Parse draftMemory array (steering memory proposals)
+    if (Array.isArray(parsed.draftMemory)) {
+      const entries = parsed.draftMemory
+        .filter((e: unknown) => e && typeof e === 'object')
+        .map((e: unknown) => sanitizeDraftMemoryEntry(e as Record<string, unknown>))
+        .filter((e: DraftMemoryEntry | undefined): e is DraftMemoryEntry => e !== undefined);
+      if (entries.length > 0) {
+        result.draftMemory = entries;
+      }
+    }
+
     return result;
   } catch {
     // Malformed JSON — degrade to response-only
@@ -309,16 +345,36 @@ function sanitizeDraftTask(raw: Record<string, unknown>): DraftTask | undefined 
   return { title: raw.title, goal: raw.goal, taskType, scopePaths };
 }
 
+const VALID_MEMORY_CATEGORIES = [
+  'coding_standard', 'architecture_invariant', 'environment_setup',
+  'domain_glossary', 'workflow_preference', 'test_convention', 'custom',
+] as const;
+
+export function sanitizeDraftMemoryEntry(raw: Record<string, unknown>): DraftMemoryEntry | undefined {
+  if (typeof raw.title !== 'string' || !raw.title) return undefined;
+  if (typeof raw.content !== 'string' || !raw.content) return undefined;
+  const category = (VALID_MEMORY_CATEGORIES as readonly string[]).includes(raw.category as string)
+    ? (raw.category as string)
+    : 'custom';
+  return { category, title: raw.title, content: raw.content };
+}
+
 const VALID_DELTA_TYPES = [
   'add_constraint', 'remove_constraint', 'add_decision', 'remove_decision',
   'add_risk', 'remove_risk', 'add_known_file', 'remove_known_file',
   'set_goal', 'set_phase', 'set_next_step', 'set_phase_goal',
   'add_phase_exit_criterion', 'remove_phase_exit_criterion',
+  'clear_phase_exit_criteria',
 ] as const;
 
 export function sanitizeDeltaOperation(raw: Record<string, unknown>): DeltaOperation | undefined {
   const type = raw.type;
   if (typeof type !== 'string' || !(VALID_DELTA_TYPES as readonly string[]).includes(type)) return undefined;
+
+  // Valueless operations
+  if (type === 'clear_phase_exit_criteria') {
+    return { type } as DeltaOperation;
+  }
 
   if (type === 'add_known_file' || type === 'remove_known_file') {
     if (typeof raw.path !== 'string' || !raw.path) return undefined;

@@ -16,7 +16,8 @@ export type DeltaOperation =
   | { type: 'set_next_step'; value: string }
   | { type: 'set_phase_goal'; value: string }
   | { type: 'add_phase_exit_criterion'; value: string }
-  | { type: 'remove_phase_exit_criterion'; value: string };
+  | { type: 'remove_phase_exit_criterion'; value: string }
+  | { type: 'clear_phase_exit_criteria' };
 
 export interface DeltaConflict {
   severity: 'warning' | 'error';

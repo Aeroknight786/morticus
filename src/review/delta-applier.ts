@@ -21,8 +21,12 @@ export async function applyAcceptedDelta(
 ): Promise<ApplyResult> {
   const newState = applyDeltaOperations(currentState, delta.operations, delta.id);
 
+  // Override version to prevent collision after resume from earlier version
+  const safeVersion = await stateStore.getNextVersion();
+  const versionedState = { ...newState, version: safeVersion };
+
   // Persist the new state version
-  await stateStore.saveVersion(newState);
+  await stateStore.saveVersion(versionedState);
 
   // Update delta status
   const acceptedDelta: StateDelta = {
@@ -36,8 +40,8 @@ export async function applyAcceptedDelta(
     deltaId: delta.id,
     operations: delta.operations,
     appliedAt: new Date().toISOString(),
-    resultingVersion: newState.version,
+    resultingVersion: versionedState.version,
   };
 
-  return { newState, applied };
+  return { newState: versionedState, applied };
 }

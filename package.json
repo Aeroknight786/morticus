@@ -28,7 +28,10 @@
       { "command": "morticus.archiveTask", "title": "Archive Task", "category": "Morticus" },
       { "command": "morticus.retryTask", "title": "Retry Task", "category": "Morticus" },
       { "command": "morticus.editTask", "title": "Edit Task", "category": "Morticus", "icon": "$(edit)" },
-      { "command": "morticus.openChat", "title": "Open Chat", "category": "Morticus", "icon": "$(comment-discussion)" }
+      { "command": "morticus.openChat", "title": "Open Chat", "category": "Morticus", "icon": "$(comment-discussion)" },
+      { "command": "morticus.openTaskDetail", "title": "Open Task Detail", "category": "Morticus", "icon": "$(symbol-class)" },
+      { "command": "morticus.resumeFromVersion", "title": "Resume from State Version", "category": "Morticus", "icon": "$(history)" },
+      { "command": "morticus.createCheckpoint", "title": "Create Checkpoint", "category": "Morticus", "icon": "$(bookmark)" }
     ],
     "viewsContainers": {
       "activitybar": [

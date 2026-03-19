@@ -51,5 +51,6 @@ export class TaskItem extends vscode.TreeItem {
     this.tooltip = `${task.title}\nGoal: ${task.goal}\nStatus: ${task.status}\nType: ${task.taskType}`;
     this.contextValue = `task-${task.status}`;
     this.iconPath = new vscode.ThemeIcon(STATUS_ICONS[task.status]?.replace('$(', '').replace(')', '') || 'circle-outline');
+    this.command = { command: 'morticus.openTaskDetail', title: 'Open Task Detail', arguments: [this] };
   }
 }

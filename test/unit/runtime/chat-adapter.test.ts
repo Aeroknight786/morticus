@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { parseChatTurnResult, buildStateSummary, buildTaskContextSection, sanitizeDeltaOperation } from '../../../src/runtime/chat-adapter.js';
-import type { TaskContext } from '../../../src/domain/chat.js';
+import { parseChatTurnResult, buildStateSummary, buildTaskContextSection, sanitizeDeltaOperation, sanitizeDraftMemoryEntry, formatMessages } from '../../../src/runtime/chat-adapter.js';
+import type { ChatMessage, TaskContext } from '../../../src/domain/chat.js';
+import type { ChatMessageId } from '../../../src/domain/ids.js';
 import type { CanonicalProjectState } from '../../../src/domain/canonical-state.js';
 import type { StateVersion, ProjectId } from '../../../src/domain/ids.js';
 
@@ -464,6 +465,16 @@ describe('sanitizeDeltaOperation', () => {
     expect(sanitizeDeltaOperation({ type: 'add_known_file' })).toBeUndefined();
     expect(sanitizeDeltaOperation({ type: 'add_known_file', path: '' })).toBeUndefined();
   });
+
+  it('accepts clear_phase_exit_criteria without value', () => {
+    const op = sanitizeDeltaOperation({ type: 'clear_phase_exit_criteria' });
+    expect(op).toEqual({ type: 'clear_phase_exit_criteria' });
+  });
+
+  it('accepts clear_phase_exit_criteria even with extra fields', () => {
+    const op = sanitizeDeltaOperation({ type: 'clear_phase_exit_criteria', value: 'ignored' });
+    expect(op).toEqual({ type: 'clear_phase_exit_criteria' });
+  });
 });
 
 describe('parseChatTurnResult — draftDelta', () => {
@@ -515,5 +526,139 @@ describe('parseChatTurnResult — draftDelta', () => {
     };
     const result = parseChatTurnResult(wrapJson(structured));
     expect(result.draftDelta).toBeUndefined();
+  });
+
+  it('parses a phase transition delta with clear and set operations', () => {
+    const structured = {
+      draftState: null,
+      draftTask: null,
+      draftDelta: [
+        { type: 'set_phase', value: 'implementation' },
+        { type: 'set_phase_goal', value: 'Build the core engine' },
+        { type: 'clear_phase_exit_criteria' },
+        { type: 'add_phase_exit_criterion', value: 'Engine plays legal games' },
+        { type: 'add_phase_exit_criterion', value: 'All unit tests pass' },
+        { type: 'set_next_step', value: 'Implement board representation' },
+      ],
+    };
+    const result = parseChatTurnResult(wrapJson(structured, "Let's transition to the implementation phase."));
+    expect(result.draftDelta).toHaveLength(6);
+    expect(result.draftDelta![0]).toEqual({ type: 'set_phase', value: 'implementation' });
+    expect(result.draftDelta![2]).toEqual({ type: 'clear_phase_exit_criteria' });
+    expect(result.draftDelta![3]).toEqual({ type: 'add_phase_exit_criterion', value: 'Engine plays legal games' });
+  });
+});
+
+describe('sanitizeDraftMemoryEntry', () => {
+  it('accepts a valid entry with known category', () => {
+    const entry = sanitizeDraftMemoryEntry({ category: 'coding_standard', title: 'Use strict TS', content: 'All files must use strict TypeScript' });
+    expect(entry).toEqual({ category: 'coding_standard', title: 'Use strict TS', content: 'All files must use strict TypeScript' });
+  });
+
+  it('defaults unknown category to custom', () => {
+    const entry = sanitizeDraftMemoryEntry({ category: 'made_up', title: 'Title', content: 'Content' });
+    expect(entry).toBeDefined();
+    expect(entry!.category).toBe('custom');
+  });
+
+  it('rejects entry missing title', () => {
+    expect(sanitizeDraftMemoryEntry({ category: 'custom', content: 'Content' })).toBeUndefined();
+    expect(sanitizeDraftMemoryEntry({ category: 'custom', title: '', content: 'Content' })).toBeUndefined();
+  });
+
+  it('rejects entry missing content', () => {
+    expect(sanitizeDraftMemoryEntry({ category: 'custom', title: 'Title' })).toBeUndefined();
+    expect(sanitizeDraftMemoryEntry({ category: 'custom', title: 'Title', content: '' })).toBeUndefined();
+  });
+});
+
+describe('parseChatTurnResult — draftMemory', () => {
+  it('parses draftMemory array from steering response', () => {
+    const structured = {
+      draftState: null,
+      draftTask: null,
+      draftMemory: [
+        { category: 'coding_standard', title: 'Use strict TS', content: 'All files must use strict mode' },
+        { category: 'domain_glossary', title: 'Widget', content: 'A reusable UI component' },
+      ],
+    };
+    const result = parseChatTurnResult(wrapJson(structured, "I'll suggest these memory entries."));
+    expect(result.draftMemory).toHaveLength(2);
+    expect(result.draftMemory![0].title).toBe('Use strict TS');
+    expect(result.draftMemory![1].category).toBe('domain_glossary');
+  });
+
+  it('filters out invalid entries from draftMemory', () => {
+    const structured = {
+      draftState: null,
+      draftMemory: [
+        { category: 'coding_standard', title: 'Valid', content: 'Has content' },
+        { category: 'custom', title: '' },  // missing content, empty title
+        null,
+        'not an object',
+      ],
+    };
+    const result = parseChatTurnResult(wrapJson(structured));
+    expect(result.draftMemory).toHaveLength(1);
+    expect(result.draftMemory![0].title).toBe('Valid');
+  });
+
+  it('omits draftMemory when array is empty', () => {
+    const structured = { draftState: null, draftMemory: [] };
+    const result = parseChatTurnResult(wrapJson(structured));
+    expect(result.draftMemory).toBeUndefined();
+  });
+
+  it('omits draftMemory when field is not an array', () => {
+    const structured = { draftState: null, draftMemory: 'not an array' };
+    const result = parseChatTurnResult(wrapJson(structured));
+    expect(result.draftMemory).toBeUndefined();
+  });
+});
+
+describe('formatMessages — transcript compaction', () => {
+  function makeMsg(role: 'user' | 'assistant', content: string): ChatMessage {
+    return { id: 'msg_test' as ChatMessageId, role, content, timestamp: '2025-01-01T00:00:00.000Z' };
+  }
+
+  it('keeps all messages when under 20 and under token budget', () => {
+    const msgs = [makeMsg('user', 'Hello'), makeMsg('assistant', 'Hi there')];
+    const result = formatMessages(msgs);
+    expect(result).toContain('Hello');
+    expect(result).toContain('Hi there');
+  });
+
+  it('caps at 20 messages from the tail', () => {
+    const msgs: ChatMessage[] = [];
+    for (let i = 0; i < 25; i++) {
+      msgs.push(makeMsg(i % 2 === 0 ? 'user' : 'assistant', `Message ${i}`));
+    }
+    const result = formatMessages(msgs);
+    expect(result).not.toContain('Message 0');
+    expect(result).not.toContain('Message 4');
+    expect(result).toContain('Message 24');
+    expect(result).toContain('Message 5');
+  });
+
+  it('trims oversized messages to stay within token budget', () => {
+    const longContent = 'x'.repeat(12_500);
+    const msgs: ChatMessage[] = [];
+    for (let i = 0; i < 10; i++) {
+      msgs.push(makeMsg(i % 2 === 0 ? 'user' : 'assistant', longContent));
+    }
+    const result = formatMessages(msgs);
+    const messageCount = (result.match(/User:|Assistant:/g) || []).length;
+    expect(messageCount).toBeLessThan(10);
+    expect(messageCount).toBeGreaterThanOrEqual(6);
+  });
+
+  it('preserves minimum 6 messages even if over budget', () => {
+    const msgs: ChatMessage[] = [];
+    for (let i = 0; i < 6; i++) {
+      msgs.push(makeMsg(i % 2 === 0 ? 'user' : 'assistant', 'y'.repeat(10_000)));
+    }
+    const result = formatMessages(msgs);
+    const messageCount = (result.match(/User:|Assistant:/g) || []).length;
+    expect(messageCount).toBe(6);
   });
 });

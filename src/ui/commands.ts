@@ -13,10 +13,13 @@ import { MemoryPanel } from './webviews/memory-panel.js';
 import { HistoryPanel } from './webviews/history-panel.js';
 import { RunDetailPanel } from './webviews/run-detail-panel.js';
 import { ChatPanel } from './webviews/chat-panel.js';
+import { TaskDetailPanel, type TaskDetailAction } from './webviews/task-detail-panel.js';
 import { StatusBar } from './status-bar.js';
 import { RunController } from '../runtime/index.js';
 import type { MemoryCategory } from '../domain/durable-memory.js';
-import { generateMemoryEntryId } from '../domain/ids.js';
+import { generateMemoryEntryId, generateCheckpointId } from '../domain/ids.js';
+import type { StateVersion } from '../domain/ids.js';
+import { resumeFromVersion } from '../review/resume-orchestrator.js';
 
 export function registerCommands(
   context: vscode.ExtensionContext,
@@ -32,6 +35,7 @@ export function registerCommands(
   let memoryPanel: MemoryPanel | undefined;
   let historyPanel: HistoryPanel | undefined;
   let chatPanel: ChatPanel | undefined;
+  let taskDetailPanel: TaskDetailPanel | undefined;
 
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
 
@@ -42,6 +46,19 @@ export function registerCommands(
     runTree.refresh();
     statusBar.refresh();
   };
+
+  function createReviewPanel() {
+    return new ReviewPanel(context.extensionUri, store, refreshAll, (outcome) => {
+      if (chatPanel) {
+        if (outcome.decision === 'accepted') {
+          chatPanel.postSystemMessage(`State updated to v${outcome.newVersion}. ${outcome.summary}.`);
+          chatPanel.refreshSnapshot();
+        } else {
+          chatPanel.postSystemMessage(`Delta rejected${outcome.taskTitle ? ` for task: ${outcome.taskTitle}` : ''}.`);
+        }
+      }
+    });
+  }
 
   // Initialize Project
   context.subscriptions.push(
@@ -187,7 +204,7 @@ export function registerCommands(
             }
 
             if (!reviewPanel) {
-              reviewPanel = new ReviewPanel(context.extensionUri, store, refreshAll);
+              reviewPanel = createReviewPanel();
             }
             await reviewPanel.showRun(delta, normalizedOutput);
 
@@ -212,7 +229,7 @@ export function registerCommands(
       try {
         const delta = await store.deltas.get(task.candidateDeltaId);
         if (!reviewPanel) {
-          reviewPanel = new ReviewPanel(context.extensionUri, store, refreshAll);
+          reviewPanel = createReviewPanel();
         }
         await reviewPanel.showDelta(delta);
       } catch (err) {
@@ -280,7 +297,16 @@ export function registerCommands(
   context.subscriptions.push(
     vscode.commands.registerCommand('morticus.openHistoryPanel', async () => {
       if (!historyPanel) {
-        historyPanel = new HistoryPanel(context.extensionUri, store);
+        historyPanel = new HistoryPanel(
+          context.extensionUri,
+          store,
+          async (version) => {
+            await vscode.commands.executeCommand('morticus.resumeFromVersion', version);
+          },
+          async (version) => {
+            await vscode.commands.executeCommand('morticus.createCheckpoint', version);
+          },
+        );
       }
       await historyPanel.show();
     }),
@@ -399,18 +425,136 @@ export function registerCommands(
     }),
   );
 
+  // Open Task Detail
+  context.subscriptions.push(
+    vscode.commands.registerCommand('morticus.openTaskDetail', async (item?: TaskItem) => {
+      const task = item?.task ?? await pickTask(store);
+      if (!task) return;
+
+      if (!taskDetailPanel) {
+        taskDetailPanel = new TaskDetailPanel(context.extensionUri, store, async (action, t) => {
+          if (action === 'compile') await vscode.commands.executeCommand('morticus.compileTaskSpec', { task: t });
+          if (action === 'run') await vscode.commands.executeCommand('morticus.runTask', { task: t });
+          if (action === 'review') await vscode.commands.executeCommand('morticus.reviewDelta', { task: t });
+          if (action === 'archive') await vscode.commands.executeCommand('morticus.archiveTask', { task: t });
+          if (action === 'retry') await vscode.commands.executeCommand('morticus.retryTask', { task: t });
+        });
+      }
+      await taskDetailPanel.showTask(task);
+    }),
+  );
+
   // Open Chat
   context.subscriptions.push(
     vscode.commands.registerCommand('morticus.openChat', async () => {
       if (!chatPanel) {
         chatPanel = new ChatPanel(context.extensionUri, store, workspaceRoot, refreshAll, async (delta) => {
           if (!reviewPanel) {
-            reviewPanel = new ReviewPanel(context.extensionUri, store, refreshAll);
+            reviewPanel = createReviewPanel();
           }
           await reviewPanel.showDelta(delta);
+        }, async (delta, normalized) => {
+          if (!reviewPanel) {
+            reviewPanel = createReviewPanel();
+          }
+          await reviewPanel.showRun(delta, normalized);
         });
       }
       await chatPanel.showChat();
+    }),
+  );
+
+  // Resume from State Version
+  context.subscriptions.push(
+    vscode.commands.registerCommand('morticus.resumeFromVersion', async (version?: number) => {
+      if (!version) {
+        const versions = await store.state.listVersions();
+        const picked = await vscode.window.showQuickPick(
+          versions.map(v => ({
+            label: `v${v.version}`,
+            description: new Date(v.createdAt).toLocaleString(),
+            version: v.version,
+          })),
+          { placeHolder: 'Select a version to resume from' },
+        );
+        if (!picked) return;
+        version = picked.version;
+      }
+
+      // Preview what will be archived so the user knows the cost
+      const allTasks = await store.tasks.list();
+      const terminalStatuses = new Set(['merged', 'rejected', 'archived']);
+      const activeTasks = allTasks.filter(t => !terminalStatuses.has(t.status));
+      const activeCount = activeTasks.length;
+
+      let confirmMsg = `Resume from state v${version}?`;
+      if (activeCount > 0) {
+        const names = activeTasks.slice(0, 5).map(t => `"${t.title}" [${t.status}]`).join(', ');
+        const overflow = activeCount > 5 ? ` and ${activeCount - 5} more` : '';
+        confirmMsg += `\n\nThis will archive ${activeCount} active task(s): ${names}${overflow}.`;
+      } else {
+        confirmMsg += '\n\nNo active tasks to archive.';
+      }
+
+      const confirm = await vscode.window.showWarningMessage(
+        confirmMsg,
+        { modal: true },
+        'Resume',
+      );
+      if (confirm !== 'Resume') return;
+
+      try {
+        const result = await resumeFromVersion(store, version as StateVersion);
+        const msg = activeCount > 0
+          ? `Resumed to v${result.resumedToVersion}. ${result.archivedTaskIds.length} task(s) archived.`
+          : `Resumed to v${result.resumedToVersion}. No tasks were affected.`;
+        vscode.window.showInformationMessage(msg);
+        refreshAll();
+        if (chatPanel) {
+          let chatMsg = `Resumed to state v${result.resumedToVersion}.`;
+          if (result.archivedTaskIds.length > 0) {
+            const archivedNames = activeTasks
+              .filter(t => result.archivedTaskIds.includes(t.id))
+              .map(t => `"${t.title}"`)
+              .join(', ');
+            chatMsg += ` Archived ${result.archivedTaskIds.length} active task(s): ${archivedNames}.`;
+          }
+          chatMsg += ' Future work will build from this state.';
+          chatPanel.postSystemMessage(chatMsg);
+          chatPanel.refreshSnapshot();
+        }
+      } catch (err) {
+        vscode.window.showErrorMessage(`Resume failed: ${(err as Error).message}`);
+      }
+    }),
+  );
+
+  // Create Checkpoint
+  context.subscriptions.push(
+    vscode.commands.registerCommand('morticus.createCheckpoint', async (version?: number) => {
+      if (!version) {
+        const current = await store.state.getCurrentVersion();
+        version = current;
+      }
+
+      const label = await vscode.window.showInputBox({
+        prompt: 'Checkpoint label',
+        placeHolder: 'e.g., "Before auth redesign"',
+      });
+      if (!label) return;
+
+      try {
+        await store.checkpoints.add({
+          id: generateCheckpointId(),
+          version: version as StateVersion,
+          label,
+          createdAt: new Date().toISOString(),
+        });
+        vscode.window.showInformationMessage(`Checkpoint "${label}" created at v${version}`);
+        refreshAll();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Checkpoint failed: ${(err as Error).message}`);
+      }
     }),
   );
 

@@ -84,4 +84,53 @@ describe('Phase fields — phaseGoal and phaseExitCriteria', () => {
     expect(next.phaseExitCriteria).toEqual(['Unit tests cover core']);
     expect(next.constraints).toEqual(['Must be fast']);
   });
+
+  it('applies clear_phase_exit_criteria', () => {
+    const state = createInitialState();
+    const withCriteria = applyDeltaOperations(state, [
+      { type: 'add_phase_exit_criterion', value: 'Tests pass' },
+      { type: 'add_phase_exit_criterion', value: 'Code reviewed' },
+    ], generateDeltaId());
+    expect(withCriteria.phaseExitCriteria).toEqual(['Tests pass', 'Code reviewed']);
+
+    const cleared = applyDeltaOperations(withCriteria, [
+      { type: 'clear_phase_exit_criteria' },
+    ], generateDeltaId());
+    expect(cleared.phaseExitCriteria).toEqual([]);
+  });
+
+  it('composes a full phase transition delta', () => {
+    const state = applyDeltaOperations(createInitialState(), [
+      { type: 'set_phase', value: 'design' },
+      { type: 'set_phase_goal', value: 'Finalize schema' },
+      { type: 'add_phase_exit_criterion', value: 'Schema finalized' },
+      { type: 'add_phase_exit_criterion', value: 'ERD approved' },
+    ], generateDeltaId());
+
+    const transitioned = applyDeltaOperations(state, [
+      { type: 'set_phase', value: 'implementation' },
+      { type: 'set_phase_goal', value: 'Build the core engine' },
+      { type: 'clear_phase_exit_criteria' },
+      { type: 'add_phase_exit_criterion', value: 'Engine plays legal games' },
+      { type: 'add_phase_exit_criterion', value: 'All tests pass' },
+      { type: 'set_next_step', value: 'Implement board representation' },
+    ], generateDeltaId());
+
+    expect(transitioned.phase).toBe('implementation');
+    expect(transitioned.phaseGoal).toBe('Build the core engine');
+    expect(transitioned.phaseExitCriteria).toEqual(['Engine plays legal games', 'All tests pass']);
+    expect(transitioned.nextStep).toBe('Implement board representation');
+    // Old criteria fully replaced
+    expect(transitioned.phaseExitCriteria).not.toContain('Schema finalized');
+    expect(transitioned.phaseExitCriteria).not.toContain('ERD approved');
+  });
+
+  it('clear_phase_exit_criteria is a no-op on empty criteria', () => {
+    const state = createInitialState();
+    expect(state.phaseExitCriteria).toEqual([]);
+    const next = applyDeltaOperations(state, [
+      { type: 'clear_phase_exit_criteria' },
+    ], generateDeltaId());
+    expect(next.phaseExitCriteria).toEqual([]);
+  });
 });

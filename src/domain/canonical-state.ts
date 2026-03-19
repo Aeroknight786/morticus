@@ -2,7 +2,13 @@ import { StateVersion, DeltaId, EvidenceId } from './ids.js';
 import type { DeltaOperation } from './state-delta.js';
 
 export interface CanonicalProjectState {
+  // Global monotonic ID for this snapshot. Unique across all versions on disk.
   version: StateVersion;
+  // The version this state was derived from. Null only for v1 (initial state).
+  // After resume: if you resume to v1 and apply a delta, the new state (e.g. v4)
+  // has parentVersion=1, NOT the version that was current before the resume.
+  // This tracks actual derivation lineage, not chronological ordering.
+  parentVersion: StateVersion | null;
   goal: string;
   phase: string;
   phaseGoal: string;
@@ -22,6 +28,7 @@ export function createInitialState(): CanonicalProjectState {
   const now = new Date().toISOString();
   return {
     version: 1,
+    parentVersion: null,
     goal: '',
     phase: '',
     phaseGoal: '',
@@ -40,6 +47,12 @@ export function createInitialState(): CanonicalProjectState {
 
 // Pure function: apply a list of delta operations to produce a new state.
 // Does not mutate the input.
+//
+// Version semantics: this function sets version = current.version + 1, which is
+// correct for linear history. After a resume, the caller (delta-applier, state-panel)
+// MUST override version with StateStore.getNextVersion() to prevent collisions
+// with existing version files. parentVersion is always set correctly here —
+// it records which state was actually used as the base for this derivation.
 export function applyDeltaOperations(
   current: CanonicalProjectState,
   operations: DeltaOperation[],
@@ -48,6 +61,7 @@ export function applyDeltaOperations(
   const next: CanonicalProjectState = {
     ...current,
     version: current.version + 1,
+    parentVersion: current.version,
     constraints: [...current.constraints],
     decisions: [...current.decisions],
     risks: [...current.risks],
@@ -111,6 +125,9 @@ export function applyDeltaOperations(
         break;
       case 'remove_phase_exit_criterion':
         next.phaseExitCriteria = next.phaseExitCriteria.filter(c => c !== op.value);
+        break;
+      case 'clear_phase_exit_criteria':
+        next.phaseExitCriteria = [];
         break;
     }
   }

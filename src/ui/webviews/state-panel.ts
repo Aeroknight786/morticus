@@ -174,14 +174,18 @@ export class StatePanel extends WebviewBase {
 
       const deltaId = generateDeltaId();
       const newState = applyDeltaOperations(this.currentState, ops, deltaId);
-      await this.store.state.saveVersion(newState);
+
+      // Override version to prevent collision after resume
+      const safeVersion = await this.store.state.getNextVersion();
+      const versionedState = { ...newState, version: safeVersion };
+      await this.store.state.saveVersion(versionedState);
 
       // Update project version pointer
       const project = await this.store.getProject();
-      project.currentStateVersion = newState.version;
+      project.currentStateVersion = versionedState.version;
       await this.store.updateProject(project);
 
-      vscode.window.showInformationMessage(`State updated to v${newState.version}`);
+      vscode.window.showInformationMessage(`State updated to v${versionedState.version}`);
       this.onStateChanged();
       await this.loadAndSend();
     }

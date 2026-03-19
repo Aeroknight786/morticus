@@ -5,6 +5,7 @@ import { readJson, writeJson, ensureDir, listJsonFiles } from './json-backend.js
 
 export interface VersionSummary {
   version: StateVersion;
+  parentVersion: StateVersion | null;
   createdAt: string;
   createdFromDeltaId: DeltaId | null;
 }
@@ -60,11 +61,26 @@ export class StateStore {
       const state = await readJson<CanonicalProjectState>(file);
       summaries.push({
         version: state.version,
+        parentVersion: state.parentVersion ?? null,
         createdAt: state.createdAt,
         createdFromDeltaId: state.createdFromDeltaId,
       });
     }
     return summaries.sort((a, b) => a.version - b.version);
+  }
+
+  async getNextVersion(): Promise<StateVersion> {
+    const files = await listJsonFiles(this.versionsDir);
+    let max = 0;
+    for (const file of files) {
+      const match = path.basename(file).match(/^v(\d+)\.json$/);
+      if (match) max = Math.max(max, parseInt(match[1], 10));
+    }
+    return (max + 1) as StateVersion;
+  }
+
+  async setCurrentVersion(version: StateVersion): Promise<void> {
+    await writeJson(this.currentPath, { version });
   }
 
   private versionPath(version: StateVersion): string {

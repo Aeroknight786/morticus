@@ -195,6 +195,57 @@ describe('runMigrationsWithSteps', () => {
   });
 });
 
+describe('v1→v2 migration: parentVersion backfill', () => {
+  it('adds parentVersion to existing state snapshots', async () => {
+    await writeProject({ schemaVersion: 1, name: 'Migrate Test' });
+
+    // Create state versions directory with v1 and v2 snapshots (no parentVersion)
+    const versionsDir = path.join(morticusPath, 'state', 'versions');
+    await ensureDir(versionsDir);
+    await writeJson(path.join(versionsDir, 'v001.json'), {
+      version: 1, goal: 'A', phase: '', phaseGoal: '', phaseExitCriteria: [],
+      constraints: [], decisions: [], risks: [], knownFiles: [], nextStep: '',
+      evidenceRefs: [], createdAt: '2025-01-01', updatedAt: '2025-01-01',
+      createdFromDeltaId: null,
+    });
+    await writeJson(path.join(versionsDir, 'v002.json'), {
+      version: 2, goal: 'B', phase: '', phaseGoal: '', phaseExitCriteria: [],
+      constraints: [], decisions: [], risks: [], knownFiles: [], nextStep: '',
+      evidenceRefs: [], createdAt: '2025-01-02', updatedAt: '2025-01-02',
+      createdFromDeltaId: 'delta_abc',
+    });
+
+    await runMigrations(morticusPath);
+
+    const v1 = await readJson<Record<string, unknown>>(path.join(versionsDir, 'v001.json'));
+    const v2 = await readJson<Record<string, unknown>>(path.join(versionsDir, 'v002.json'));
+    expect(v1.parentVersion).toBeNull();
+    expect(v2.parentVersion).toBe(1);
+
+    const proj = await readProject();
+    expect(proj.schemaVersion).toBe(2);
+  });
+
+  it('is idempotent — does not overwrite existing parentVersion', async () => {
+    await writeProject({ schemaVersion: 1, name: 'Idempotent Test' });
+
+    const versionsDir = path.join(morticusPath, 'state', 'versions');
+    await ensureDir(versionsDir);
+    // v1 already has parentVersion (simulates partial migration)
+    await writeJson(path.join(versionsDir, 'v001.json'), {
+      version: 1, parentVersion: null, goal: '', phase: '', phaseGoal: '', phaseExitCriteria: [],
+      constraints: [], decisions: [], risks: [], knownFiles: [], nextStep: '',
+      evidenceRefs: [], createdAt: '2025-01-01', updatedAt: '2025-01-01',
+      createdFromDeltaId: null,
+    });
+
+    await runMigrations(morticusPath);
+
+    const v1 = await readJson<Record<string, unknown>>(path.join(versionsDir, 'v001.json'));
+    expect(v1.parentVersion).toBeNull();
+  });
+});
+
 describe('runMigrations', () => {
   it('throws SCHEMA_VERSION_TOO_NEW when project is ahead', async () => {
     await writeProject({ schemaVersion: CURRENT_SCHEMA_VERSION + 1, name: 'Future' });

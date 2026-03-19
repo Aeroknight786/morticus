@@ -1,9 +1,9 @@
 import * as path from 'node:path';
-import { readJson, writeJson } from './json-backend.js';
+import { readJson, writeJson, listJsonFiles } from './json-backend.js';
 import { MorticusError } from '../domain/errors.js';
 
 // Current schema version. Bump this when adding a new migration step.
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export interface MigrationStep {
   fromVersion: number;
@@ -15,8 +15,26 @@ export interface MigrationStep {
   migrate: (morticusPath: string) => Promise<void>;
 }
 
-// Ordered registry. Empty initially — populated as real schema changes arise.
-const MIGRATIONS: MigrationStep[] = [];
+// Ordered registry of migration steps.
+const MIGRATIONS: MigrationStep[] = [
+  {
+    fromVersion: 1,
+    toVersion: 2,
+    description: 'Add parentVersion to state snapshots',
+    async migrate(morticusPath: string) {
+      const versionsDir = path.join(morticusPath, 'state', 'versions');
+      const files = await listJsonFiles(versionsDir);
+      for (const file of files) {
+        const state = await readJson<Record<string, unknown>>(file);
+        if (state.parentVersion === undefined) {
+          const version = state.version as number;
+          state.parentVersion = version > 1 ? version - 1 : null;
+          await writeJson(file, state);
+        }
+      }
+    },
+  },
+];
 
 export function getMigrationSteps(from: number, to: number): MigrationStep[] {
   return MIGRATIONS.filter(m => m.fromVersion >= from && m.toVersion <= to)

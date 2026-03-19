@@ -13,6 +13,7 @@ export class ReviewPanel extends WebviewBase {
     extensionUri: vscode.Uri,
     private store: ProjectStore,
     private onMerged: () => void,
+    private onReviewComplete?: (outcome: { decision: 'accepted' | 'rejected'; newVersion?: number; summary?: string; taskTitle?: string }) => void,
   ) {
     super(extensionUri, 'morticus.reviewPanel', 'Review State Delta');
   }
@@ -113,7 +114,8 @@ export class ReviewPanel extends WebviewBase {
           const isAdd = op.type.startsWith('add_');
           const isRemove = op.type.startsWith('remove_');
           div.className = 'op' + (isAdd ? ' op-add' : isRemove ? ' op-remove' : ' op-set');
-          div.textContent = op.type + ': ' + (op.value || op.path || '');
+          var val = op.value || op.path || '';
+          div.textContent = op.type + (val ? ': ' + val : '');
           opsEl.appendChild(div);
         }
       }
@@ -144,18 +146,20 @@ export class ReviewPanel extends WebviewBase {
         project.currentStateVersion = result.newState.version;
         await this.store.updateProject(project);
 
+        // Resolve task title for knowledge extraction and review routing
+        let taskTitle = 'Chat proposal';
+        if (this.delta.taskId) {
+          try {
+            const task = await this.store.tasks.get(this.delta.taskId);
+            taskTitle = task.title;
+          } catch {
+            // Task may have been deleted; use fallback title
+          }
+        }
+
         // Auto-extract knowledge from accepted decisions
         let extractedCount = 0;
         if (this.delta.operations.length > 0) {
-          let taskTitle = 'Chat proposal';
-          if (this.delta.taskId) {
-            try {
-              const task = await this.store.tasks.get(this.delta.taskId);
-              taskTitle = task.title;
-            } catch {
-              // Task may have been deleted; use fallback title
-            }
-          }
           const latestRunId = null; // RunId is on the task, not the delta
           const candidates = extractKnowledge(
             this.delta.operations,
@@ -188,15 +192,32 @@ export class ReviewPanel extends WebviewBase {
 
         this.onMerged();
         this.panel?.dispose();
+        this.onReviewComplete?.({
+          decision: 'accepted',
+          newVersion: result.newState.version,
+          summary: `${this.delta!.operations.length} operations applied`,
+          taskTitle,
+        });
       } catch (err) {
         vscode.window.showErrorMessage(`Failed to apply delta: ${(err as Error).message}`);
       }
     } else if (msg.type === 'reject') {
+      let taskTitle = 'Chat proposal';
+      if (this.delta.taskId) {
+        try {
+          const task = await this.store.tasks.get(this.delta.taskId);
+          taskTitle = task.title;
+        } catch { /* fallback */ }
+      }
       this.delta = { ...this.delta, status: 'rejected', reviewedAt: new Date().toISOString() };
       await this.store.deltas.save(this.delta);
       vscode.window.showInformationMessage('Delta rejected.');
       this.onMerged();
       this.panel?.dispose();
+      this.onReviewComplete?.({
+        decision: 'rejected',
+        taskTitle,
+      });
     }
   }
 }

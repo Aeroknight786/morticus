@@ -16,6 +16,14 @@ export interface DraftCanonicalState {
   nextStep?: string;
 }
 
+// Draft memory entry proposed by Claude in steering mode.
+// Confirmed by the user directly in chat (no review panel needed).
+export interface DraftMemoryEntry {
+  category: string;  // MemoryCategory value
+  title: string;
+  content: string;
+}
+
 // Lightweight draft task surfaced as a card in chat.
 // suggestionId is assigned when a task moves to pendingSuggestedTasks on accept.
 // Not present during kickoff accumulation or in Claude output — client-side lifecycle only.
@@ -39,6 +47,7 @@ export interface ChatTurnResult {
   draftTask?: DraftTask;
   draftTasks?: DraftTask[];
   draftDelta?: DeltaOperation[];
+  draftMemory?: DraftMemoryEntry[];
 }
 
 // Lightweight task context for enriching the steering prompt.
@@ -47,6 +56,18 @@ export interface TaskContext {
   activeTasks: { title: string; taskType: string; status: string }[];
   recentlyCompleted: { title: string; taskType: string; goal: string }[];
   awaitingReview: { title: string }[];
+}
+
+// Compact project state snapshot for the chat home surface.
+// Pure type — built from CanonicalProjectState + task list in the UI layer.
+export interface ProjectSnapshot {
+  goal: string;
+  phase: string;
+  phaseGoal: string;
+  nextStep: string;
+  stateVersion: number;
+  activeTaskCount: number;
+  awaitingReviewCount: number;
 }
 
 export type ChatMode = 'kickoff' | 'steering';
@@ -61,6 +82,7 @@ export interface ChatMessage {
   draftTask?: DraftTask;
   draftTasks?: DraftTask[];
   draftDelta?: DeltaOperation[];
+  draftMemory?: DraftMemoryEntry[];
 }
 
 export interface ChatSession {
