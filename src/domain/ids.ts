@@ -11,6 +11,9 @@ export type MemoryEntryId = string & { readonly __brand: 'MemoryEntryId' };
 export type ChatSessionId = string & { readonly __brand: 'ChatSessionId' };
 export type ChatMessageId = string & { readonly __brand: 'ChatMessageId' };
 export type CheckpointId = string & { readonly __brand: 'CheckpointId' };
+export type ScratchpadId = string & { readonly __brand: 'ScratchpadId' };
+export type ArchiveId = string & { readonly __brand: 'ArchiveId' };
+export type MemCellId = string & { readonly __brand: 'MemCellId' };
 // Global monotonic state version ID. Each version file on disk has a unique
 // StateVersion. Values are never reused — after resuming from v1 when v3
 // exists, the next version is v4, not v2. Assigned by StateStore.getNextVersion().
@@ -63,6 +66,18 @@ export function generateChatMessageId(): ChatMessageId {
 
 export function generateCheckpointId(): CheckpointId {
   return makeId('ckpt') as CheckpointId;
+}
+
+export function generateScratchpadId(): ScratchpadId {
+  return makeId('scratch') as ScratchpadId;
+}
+
+export function generateArchiveId(): ArchiveId {
+  return makeId('arch') as ArchiveId;
+}
+
+export function generateMemCellId(): MemCellId {
+  return makeId('mc') as MemCellId;
 }
 
 // Non-branded ID for suggested task lifecycle tracking.

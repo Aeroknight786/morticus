@@ -1,4 +1,6 @@
 export { RunController } from './run-controller.js';
+export { runLlm, getConfiguredProvider, getConfiguredModel } from './llm-provider.js';
+export type { LlmRunResult, LlmRunOptions, LlmProvider } from './llm-provider.js';
 export { runClaude } from './claude-adapter.js';
 export type { ClaudeRunResult, ClaudeAdapterOptions } from './claude-adapter.js';
 export { buildPrompt } from './prompt-builder.js';

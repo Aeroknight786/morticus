@@ -20,6 +20,8 @@ function makeEntry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
     active: true,
     reviewed: true,
     normalizedValue: null,
+    sourceArchiveId: null,
+    memCellId: null,
     sourceTaskId: null,
     sourceRunId: null,
     sourceDeltaId: null,

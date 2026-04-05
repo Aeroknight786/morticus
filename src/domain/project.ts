@@ -1,6 +1,6 @@
 import { ProjectId, StateVersion } from './ids.js';
 
-export type ProviderType = 'claude';
+export type ProviderType = 'claude' | 'codex';
 
 export interface ProjectSettings {
   defaultProvider: ProviderType;

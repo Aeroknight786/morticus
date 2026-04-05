@@ -38,7 +38,7 @@
 - [x] Review panel accept hook: extractKnowledge + deduplicateEntries on delta accept
 - [x] package.json updated (commands, views, menus)
 
-## Phase 4A — Done
+## Phase 4A — Done: Chat Foundation
 - [x] ChatMessage, ChatSession, ChatTurnResult types (`src/domain/chat.ts`)
 - [x] ChatSessionId, ChatMessageId branded types (`src/domain/ids.ts`)
 - [x] Add phaseGoal, phaseExitCriteria to CanonicalProjectState
@@ -71,8 +71,9 @@ See `docs/phase4a6-plan.md` for full plan.
 - [x] Comment/doc cleanup (draftTasks/pendingSuggestedTasks comments, createChatSession init, backward compat)
 - [x] Tests (11 new — pendingSuggestedTasks lifecycle, suggestionId uniqueness/serialization — 206 total)
 
-## Phase 4B.1 — Done: "What should we do next?"
+## Phase 4B — Done: Strategic Trunk
 
+### 4B.1 — "What should we do next?"
 - [x] `phaseExitCriteria` added to `buildStateSummary` (strategic reasoning needs exit criteria visibility)
 - [x] `goal` added to `TaskContext.recentlyCompleted` (Claude needs completed task goals to reason about progress)
 - [x] `draftTasks` (plural) added to steering output contract (multi-task strategic suggestions)
@@ -80,8 +81,7 @@ See `docs/phase4a6-plan.md` for full plan.
 - [x] `draftTasks` on `ChatMessage` + webview rendering of multi-task cards in steering mode
 - [x] Tests (5 new — phaseExitCriteria, recently completed goals, steering draftTasks parsing — 211 total)
 
-## Phase 4B.2 — Done: Chat-Driven State Updates
-
+### 4B.2 — Chat-Driven State Updates
 - [x] `StateDelta.taskId` nullable (`TaskId | null`) for chat-originated deltas
 - [x] `validateDelta` spec parameter optional (chat deltas skip scope checks)
 - [x] ReviewPanel + knowledge-extractor handle null taskId (fallback to "Chat proposal")
@@ -92,6 +92,59 @@ See `docs/phase4a6-plan.md` for full plan.
 - [x] `handleReviewDelta` → creates StateDelta, validates, saves, opens ReviewPanel
 - [x] Commands.ts wiring: `onDeltaProposed` callback connects chat panel to review panel
 - [x] Tests (12 new — sanitizer: 6, draftDelta parsing: 4, validator no-spec: 2 — 223 total)
+
+### 4B.3 — Chat-Driven Phase Transitions
+- [x] `clear_phase_exit_criteria` delta operation (type, state application, sanitizer, output contract)
+- [x] Steering prompt: dedicated phase transition guidance (compose complete transition, suggest when criteria met)
+- [x] Delta card rendering: handle valueless operations (chat-panel.ts + review-panel.ts)
+- [x] Tests (6 new — clear operation: 3, full transition composition: 1, sanitizer valueless: 2, draftDelta parsing: 1 — 254 total)
+
+### 4B.4 — Chat-Driven Memory Proposals
+- [x] `DraftMemoryEntry` type on `ChatTurnResult` and `ChatMessage`
+- [x] Memory cards in chat with confirm/dismiss
+- [x] `sanitizeDraftMemoryEntry` parser in chat-adapter
+- [x] Tests (memory sanitizer: 4, draftMemory parsing: 4)
+
+### 4B.5 — Intent Pre-Classification
+- [x] `classifyIntent` deterministic classifier (state_query, task_query, greeting, delegate)
+- [x] `generateLocalResponse` for fast-path responses without Claude
+- [x] Tests (intent classifier: 19)
+
+### 4B.6 — Transcript Compaction
+- [x] Token-budget sliding window in `formatMessages`
+- [x] Tests (transcript compaction: 4)
+
+## Phase 4C — Done: Task Workspace Strengthening
+- [x] `listByTask(taskId)` on RunStore (filter runs by task)
+- [x] Task Detail Panel webview (`src/ui/webviews/task-detail-panel.ts`)
+  - Task metadata, goal, status badge (color-coded)
+  - Compiled spec summary (tools, write permissions, est. tokens)
+  - Run history with duration and status
+  - Candidate delta display with operations
+  - Contextual action buttons (Compile / Run / Review / Archive / Retry)
+- [x] `morticus.openTaskDetail` command in commands.ts + package.json
+- [x] Task tree click → opens Task Detail Panel (tree item command)
+
+## Phase 5 — Done: Checkpoint + Resume from State
+
+What this IS: checkpoint (named bookmarks) + resume (repoint current state to any historical version).
+What this is NOT: git-style branching with named branches, merge operations, or divergent branch UI.
+The version history forms a DAG via `parentVersion`, but there is no tree visualization yet (that's Phase 12).
+
+- [x] `parentVersion: StateVersion | null` on `CanonicalProjectState` (tracks derivation lineage, not chronological order)
+- [x] `Checkpoint` interface + `CheckpointId` branded type (`src/domain/checkpoint.ts`, `src/domain/ids.ts`)
+- [x] `getNextVersion()` on StateStore (scans version files, returns max+1 — prevents collision after resume)
+- [x] `setCurrentVersion()` on StateStore (repoints current.json without creating version file)
+- [x] `parentVersion` on `VersionSummary` for history UI
+- [x] `CheckpointStore` (`src/storage/checkpoint-store.ts`) — JSON persistence at `.morticus/checkpoints.json`
+- [x] Schema migration v1→v2 — backfills `parentVersion` on existing state snapshots
+- [x] `resumeFromVersion()` orchestrator (`src/review/resume-orchestrator.ts`) — repoints state, archives active tasks
+- [x] Version collision fix in `delta-applier.ts` — uses `getNextVersion()` instead of `current.version + 1`
+- [x] Version collision fix in `state-panel.ts` — same fix for direct state edits
+- [x] History panel: Resume + Checkpoint buttons, current badge, lineage-aware diffs and labels
+- [x] `morticus.resumeFromVersion` command (preview of affected tasks, confirmation, chat system message, snapshot refresh)
+- [x] `morticus.createCheckpoint` command (label prompt, persists to CheckpointStore)
+- [x] Tests (resume→delta→version semantics, multi-resume, checkpoint persistence, parentVersion lineage)
 
 ## Phase 5A — Done: Schema Migration + Context Slicing
 
@@ -114,66 +167,78 @@ See `docs/phase4a6-plan.md` for full plan.
 - [x] Validation tasks default to `excludeCategories: ['domain_glossary']`
 - [x] Tests (14 new context-pack, 2 spec-resolver category tests, prompt-builder updates — 248 total)
 
-## Phase 6 — Done: Chat as Coherent Home Surface
+## Chat as Coherent Home Surface — Done (tightened)
 
-- [x] WS1: `ProjectSnapshot` interface in `src/domain/chat.ts`
-- [x] WS1: Snapshot UI in chat panel — compact grid below mode bar, `buildProjectSnapshot()`, `refreshSnapshot()`, included in init for steering mode
-- [x] WS4: Kickoff completeness cues — `renderCompleteness()` with warn/hint/note levels, dynamic accept button text with summary
-- [x] WS2: Dual task card buttons — "Create Draft" + "Create & Run" (blue) with progress indicators
-- [x] WS2: `handleConfirmAndRunTask()` — one-click create → compile spec → run → open review
-- [x] WS2: `onRunComplete` callback on ChatPanel constructor, wired in commands.ts
-- [x] WS3: `onReviewComplete` callback on ReviewPanel — fires on accept/reject with outcome details
-- [x] WS3: `postSystemMessage()` and `refreshSnapshot()` public methods on ChatPanel
-- [x] WS3: `createReviewPanel` helper in commands.ts — routes review outcomes back to chat as system messages + snapshot refresh
+- [x] `ProjectSnapshot` view model (moved from domain layer to `chat-panel.ts` — it's a display type, not domain)
+- [x] Snapshot UI in chat panel — compact grid below mode bar, `buildProjectSnapshot()`, `refreshSnapshot()`
+- [x] Kickoff completeness cues — `renderCompleteness()` with warn/hint/note levels, dynamic accept button text
+- [x] Dual task card buttons — "Create Draft" + "Create & Run" (blue) with progress indicators
+- [x] `handleConfirmAndRunTask()` — one-click create → compile spec → run → open review
+- [x] `createTaskFromDraft()` shared helper (eliminates duplication between Create Draft and Create & Run)
+- [x] `onRunComplete` callback on ChatPanel constructor, wired in commands.ts
+- [x] `onReviewComplete` callback on ReviewPanel — fires on accept/reject with outcome details
+- [x] ReviewPanel transitions task to `merged`/`rejected` on accept/reject (was stuck at `awaiting_review`)
+- [x] `postSystemMessage()` and `refreshSnapshot()` public methods on ChatPanel
+- [x] `createReviewPanel` helper in commands.ts — routes review outcomes back to chat
+- [x] Snapshot refreshes on both accept AND reject (reject was missing)
 
-## Phase 4B.3 — Done: Chat-Driven Phase Transitions
+## Phase 6 — Done: Scratchpad Mode v1
 
-- [x] `clear_phase_exit_criteria` delta operation (type, state application, sanitizer, output contract)
-- [x] Steering prompt: dedicated phase transition guidance (compose complete transition, suggest when criteria met)
-- [x] Delta card rendering: handle valueless operations (chat-panel.ts + review-panel.ts)
-- [x] Tests (6 new — clear operation: 3, full transition composition: 1, sanitizer valueless: 2, draftDelta parsing: 1 — 254 total)
+Temporary exploratory side-workspace for brainstorming and research, separate from the strategic trunk.
 
-## Phase 4B — Done: Strategic Trunk
-- [x] "What should we do next?" — grounded strategic suggestion from state + task status (4B.1)
-- [x] State update proposals from chat → draft delta → review (4B.2)
-- [x] Phase transitions from chat → draft delta → review (4B.3)
-- [x] Memory update proposals from chat → draft memory entry (4B.4)
-- [x] Deterministic intent pre-classification (fast path before Claude) (4B.5)
-- [x] Chat transcript compaction / token-budget sliding window (4B.6)
+- [x] `ScratchpadId` branded type and `generateScratchpadId()` (`src/domain/ids.ts`)
+- [x] `ScratchpadSession`, `ScratchpadHandoff`, `ScratchpadOrigin`, `ScratchpadStatus` domain types (`src/domain/scratchpad.ts`)
+- [x] `createScratchpadSession()` pure constructor
+- [x] `parseScratchpadHandoff()` defensive parser for Claude's structured output (no candidateMemory in v1)
+- [x] `ScratchpadStore` — one file per session at `.morticus/scratchpad/<id>.json`, `getActive()` for v1 single-session constraint
+- [x] `ProjectStore.scratchpad` sub-store wiring
+- [x] `sendScratchpadTurn()` — response only, no mutation parsing (structurally prevents mutation leakage)
+- [x] `requestScratchpadHandoff()` — requests and parses structured handoff with separate markers
+- [x] `parseScratchpadHandoffResponse()` — extracts handoff JSON between `---MORTICUS-SCRATCHPAD-HANDOFF-START/END---` markers
+- [x] `buildParentContextSummary()` — frozen parent context built at spawn time (goal/phase/memory/recent messages)
+- [x] `ScratchpadPanel` webview with amber/orange visual theme, origin chip, auto-archive on close-without-handoff
+- [x] Handoff card with action buttons: Create Task, Send to Review, Archive, Discard, Continue Exploring
+- [x] `ScratchpadHandoffAction` discriminated union type for dispatching handoff actions
+- [x] `ChatPanel.injectDraftTask()` — injects candidate task card into main chat from external source
+- [x] `ChatPanel.routeDeltaToReview()` — routes candidate delta to ReviewPanel (does not display in chat)
+- [x] "Scratchpad" button in chat input area (steering mode only)
+- [x] `morticus.openScratchpad` command — creates session with frozen context, handles all handoff action routing
+- [x] Tests (8 domain scratchpad, 6 adapter handoff parsing, 6 buildParentContextSummary — 326 total)
 
-## Phase 4C — Done: Task Workspace Strengthening
+## Phase 9 — Done: Context Slicing and Cost Governance
 
-- [x] `listByTask(taskId)` on RunStore (filter runs by task)
-- [x] Task Detail Panel webview (`src/ui/webviews/task-detail-panel.ts`)
-  - Task metadata, goal, status badge (color-coded)
-  - Compiled spec summary (tools, write permissions, est. tokens)
-  - Run history with duration and status
-  - Candidate delta display with operations
-  - Contextual action buttons (Compile / Run / Review / Archive / Retry)
-- [x] `morticus.openTaskDetail` command in commands.ts + package.json
-- [x] Task tree click → opens Task Detail Panel (tree item command)
-- [x] Tests (31 new — memory sanitizer: 4, draftMemory parsing: 4, intent classifier: 19, transcript compaction: 4 — 285 total)
+- [x] `ContextSurface`, `StateSlicePolicy`, `MemorySlicePolicy`, `TokenBudget`, `ContextProfile` domain types (`src/domain/context-policy.ts`)
+- [x] `ContextManifest`, `TrimmedField` diagnostic types for what was included/excluded and why
+- [x] Pure scoring functions: `tokenize`, `scoreKeywordRelevance`, `filterByScope`, `filterByScopeKeywords`, `extractRelevanceKeywords`
+- [x] `resolveContextProfile(surface, taskType?, scopePaths?)` — per-surface context policies (task_run, chat_steering, chat_kickoff, scratchpad)
+- [x] `buildContextDiagnostics(manifest)` — human-readable diagnostics string
+- [x] `ContextPackOptions` extended: `includePhaseExitCriteria`, `memoryRelevanceThreshold`, `relevanceKeywords`, `scopeFilterKnownFiles`, `scopePaths`, `scopeFilterDecisions`, `scopeFilterRisks`
+- [x] `ContextPack.contextManifest` — populated by context compiler with inclusion/exclusion details
+- [x] `ContextMetrics` extended: `memoryIncluded`, `memoryExcluded`, `contextDiagnostics`
+- [x] `ChatTurnResult.contextTokenEstimate` — token estimate for chat turns
+- [x] `context-pack.ts`: scope filtering (knownFiles path prefix, decisions/risks keyword overlap), relevance scoring pipeline, manifest generation, phaseExitCriteria support
+- [x] `spec-resolver.ts`: uses `resolveContextProfile` instead of hardcoded task-type defaults
+- [x] `chat-adapter.ts`: profile-driven memory limiting, conversation token budget, context token estimate
+- [x] `scratchpad-adapter.ts`: profile-driven memory limiting
+- [x] `run-controller.ts`: persists manifest/diagnostics into `ContextMetrics`
+- [x] `run-detail-panel.ts`: displays memory included/excluded, context diagnostics (expandable)
+- [x] Tests (23 context-policy, 11 context-pack scope/relevance/manifest/phaseExitCriteria — 362 total)
 
-## Phase 5 — Done: Checkpoint + Resume from State
+## Phase 8A — Done: Transcript Import / Migration with Minimal Archive Foundation
 
-What this IS: checkpoint (named bookmarks) + resume (repoint current state to any historical version).
-What this is NOT: git-style branching with named branches, merge operations, or divergent branch UI.
-The version history forms a DAG via `parentVersion`, but there is no tree visualization yet (that's Phase 12).
-
-- [x] `parentVersion: StateVersion | null` on `CanonicalProjectState` (tracks derivation lineage, not chronological order)
-- [x] `Checkpoint` interface + `CheckpointId` branded type (`src/domain/checkpoint.ts`, `src/domain/ids.ts`)
-- [x] `getNextVersion()` on StateStore (scans version files, returns max+1 — prevents collision after resume)
-- [x] `setCurrentVersion()` on StateStore (repoints current.json without creating version file)
-- [x] `parentVersion` on `VersionSummary` for history UI
-- [x] `CheckpointStore` (`src/storage/checkpoint-store.ts`) — JSON persistence at `.morticus/checkpoints.json`
-- [x] Schema migration v1→v2 — backfills `parentVersion` on existing state snapshots
-- [x] `resumeFromVersion()` orchestrator (`src/review/resume-orchestrator.ts`) — repoints state, archives active tasks
-- [x] Version collision fix in `delta-applier.ts` — uses `getNextVersion()` instead of `current.version + 1`
-- [x] Version collision fix in `state-panel.ts` — same fix for direct state edits
-- [x] History panel: Resume + Checkpoint buttons, current badge, lineage-aware diffs and labels
-- [x] `morticus.resumeFromVersion` command (preview of affected tasks, confirmation, chat system message, snapshot refresh)
-- [x] `morticus.createCheckpoint` command (label prompt, persists to CheckpointStore)
-- [x] Tests (resume→delta→version semantics, multi-resume, checkpoint persistence, parentVersion lineage)
+- [x] `import.ts` domain types: `ImportSourceType`, `ImportSourceMeta`, `TranscriptChunk`, `DocSection`, `ImportChunk`, `ImportExtractionResult`, `ImportConflict`, `ArchiveRecord`, `AcceptedItemRef`, `createArchiveRecord()`
+- [x] `ArchiveId` branded type + `generateArchiveId()` in `ids.ts`
+- [x] `MemoryOrigin` extended with `'imported'`, `sourceArchiveId: ArchiveId | null` on `MemoryEntry`
+- [x] `IMPORT_PARSE_ERROR`, `IMPORT_EXTRACTION_ERROR` error codes
+- [x] `transcript-parser.ts`: `detectImportFormat`, `parseMarkdownTranscript`, `parseTextChatDump`, `parsePlanningDoc`, `parseImportSource` — deterministic, no LLM
+- [x] `import-extractor.ts`: extraction prompt + response parsing with reused sanitizers, bookend strategy for large transcripts
+- [x] `import-conflict-detector.ts`: pure conflict detection with word-overlap severity scoring
+- [x] Exported `sanitizeDraftState`, `sanitizeDraftTask` from `chat-adapter.ts`
+- [x] `archive-store.ts`: `ArchiveStore` (save, get, list, saveRawContent, getRawContent) + wired into `ProjectStore`
+- [x] Schema migration v2→v3: `sourceArchiveId: null` backfill on existing memory entries
+- [x] `import-panel.ts`: multi-step import wizard webview (parse → extract → review → apply)
+- [x] `morticus.importTranscript` command in `commands.ts` + `package.json`
+- [x] Tests (55 parser, 13 extractor, 13 conflict detector, 3 domain, 3 migrator — 449 total)
 
 ## Later
 - [ ] Claim graph (typed claims with evidence, supersession)

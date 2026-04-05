@@ -1,8 +1,14 @@
-import { describe, it, expect } from 'vitest';
-import { parseChatTurnResult, buildStateSummary, buildTaskContextSection, sanitizeDeltaOperation, sanitizeDraftMemoryEntry, formatMessages } from '../../../src/runtime/chat-adapter.js';
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('../../../src/runtime/llm-provider.js', () => ({
+  runLlm: vi.fn(),
+}));
+
+import { parseChatTurnResult, buildStateSummary, buildTaskContextSection, sanitizeDeltaOperation, sanitizeDraftMemoryEntry, formatMessages, buildParentContextSummary } from '../../../src/runtime/chat-adapter.js';
 import type { ChatMessage, TaskContext } from '../../../src/domain/chat.js';
 import type { ChatMessageId } from '../../../src/domain/ids.js';
 import type { CanonicalProjectState } from '../../../src/domain/canonical-state.js';
+import type { DurableMemory, MemoryEntry } from '../../../src/domain/durable-memory.js';
 import type { StateVersion, ProjectId } from '../../../src/domain/ids.js';
 
 const START = '---MORTICUS-CHAT-START---';
@@ -660,5 +666,79 @@ describe('formatMessages — transcript compaction', () => {
     const result = formatMessages(msgs);
     const messageCount = (result.match(/User:|Assistant:/g) || []).length;
     expect(messageCount).toBe(6);
+  });
+});
+
+describe('buildParentContextSummary', () => {
+  function makeState(overrides: Partial<CanonicalProjectState> = {}): CanonicalProjectState {
+    return {
+      version: 3 as StateVersion,
+      goal: 'Build pricing engine',
+      phase: 'implementation',
+      phaseGoal: 'Core engine',
+      phaseExitCriteria: [],
+      constraints: [],
+      decisions: [],
+      risks: [],
+      knownFiles: [],
+      nextStep: 'Implement rate calculator',
+      evidenceRefs: [],
+      createdAt: '2025-01-01T00:00:00.000Z',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+      createdFromDeltaId: null,
+      ...overrides,
+    };
+  }
+
+  const emptyMemory: DurableMemory = { version: 1, entries: [], updatedAt: '2025-01-01T00:00:00.000Z' };
+
+  it('includes state fields in summary', () => {
+    const result = buildParentContextSummary(makeState(), emptyMemory, []);
+    expect(result).toContain('Goal: Build pricing engine');
+    expect(result).toContain('Phase: implementation');
+    expect(result).toContain('Phase goal: Core engine');
+    expect(result).toContain('Next step: Implement rate calculator');
+    expect(result).toContain('State version: v3');
+  });
+
+  it('returns empty string when no state, memory, or messages', () => {
+    const result = buildParentContextSummary(null, emptyMemory, []);
+    expect(result).toBe('');
+  });
+
+  it('includes active memory entries', () => {
+    const mem: DurableMemory = {
+      version: 1,
+      entries: [
+        { id: 'mem_1' as any, category: 'coding_standard', title: 'Use strict TS', content: 'c', origin: 'user', active: true, reviewed: true, normalizedValue: null, sourceArchiveId: null, memCellId: null, sourceTaskId: null, sourceRunId: null, sourceDeltaId: null, sourceOperationType: null, createdAt: '', updatedAt: '' },
+        { id: 'mem_2' as any, category: 'custom', title: 'Inactive', content: 'c', origin: 'user', active: false, reviewed: true, normalizedValue: null, sourceArchiveId: null, memCellId: null, sourceTaskId: null, sourceRunId: null, sourceDeltaId: null, sourceOperationType: null, createdAt: '', updatedAt: '' },
+      ],
+      updatedAt: '',
+    };
+    const result = buildParentContextSummary(null, mem, []);
+    expect(result).toContain('Active memory (1)');
+    expect(result).toContain('[coding_standard] Use strict TS');
+    expect(result).not.toContain('Inactive');
+  });
+
+  it('includes recent messages (max 5, truncated to 200 chars)', () => {
+    const msgs: ChatMessage[] = [];
+    for (let i = 0; i < 8; i++) {
+      msgs.push({ id: `msg_${i}` as ChatMessageId, role: i % 2 === 0 ? 'user' : 'assistant', content: `Message ${i}`, timestamp: '' });
+    }
+    const result = buildParentContextSummary(null, emptyMemory, msgs);
+    expect(result).toContain('Recent conversation:');
+    // Only last 5 of 8 messages
+    expect(result).not.toContain('Message 0');
+    expect(result).not.toContain('Message 1');
+    expect(result).not.toContain('Message 2');
+    expect(result).toContain('Message 3');
+    expect(result).toContain('Message 7');
+  });
+
+  it('truncates long messages to 200 chars', () => {
+    const longMsg: ChatMessage = { id: 'msg_long' as ChatMessageId, role: 'user', content: 'A'.repeat(300), timestamp: '' };
+    const result = buildParentContextSummary(null, emptyMemory, [longMsg]);
+    expect(result).toContain('A'.repeat(197) + '...');
   });
 });

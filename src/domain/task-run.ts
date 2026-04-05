@@ -9,6 +9,9 @@ export interface ContextMetrics {
   estimatedTokens: number;
   activeMemoryEntryCount: number;
   stablePrefixLength: number;
+  memoryIncluded: number;
+  memoryExcluded: number;
+  contextDiagnostics: string | null;
 }
 
 export interface TaskRun {

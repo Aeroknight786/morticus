@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { WebviewBase } from './webview-base.js';
 import type { ProjectStore } from '../../storage/store.js';
-import type { ChatMessage, DraftCanonicalState, DraftTask, DraftMemoryEntry, ChatSession, TaskContext, ProjectSnapshot } from '../../domain/chat.js';
+import type { ChatMessage, DraftCanonicalState, DraftTask, DraftMemoryEntry, ChatSession, TaskContext } from '../../domain/chat.js';
 import { createChatSession, mergeDraftState, mergeDraftTasks } from '../../domain/chat.js';
 import { generateChatSessionId, generateChatMessageId, generateTaskId, generateSuggestionId, generateDeltaId } from '../../domain/ids.js';
 import { createStateDelta, type DeltaOperation, type StateDelta } from '../../domain/state-delta.js';
@@ -15,6 +15,18 @@ import type { NormalizedOutput } from '../../domain/task-run.js';
 import { classifyIntent, generateLocalResponse } from '../../runtime/intent-classifier.js';
 import { generateMemoryEntryId } from '../../domain/ids.js';
 import type { MemoryCategory } from '../../domain/durable-memory.js';
+
+// View model for the project snapshot grid in chat.
+// Not a domain type — assembled from CanonicalProjectState + task list for display only.
+interface ProjectSnapshot {
+  goal: string;
+  phase: string;
+  phaseGoal: string;
+  nextStep: string;
+  stateVersion: number;
+  activeTaskCount: number;
+  awaitingReviewCount: number;
+}
 
 export class ChatPanel extends WebviewBase {
   private session: ChatSession | null = null;
@@ -193,6 +205,7 @@ export class ChatPanel extends WebviewBase {
   <div id="input-area">
     <textarea id="input" placeholder="Describe your project..." rows="2"></textarea>
     <button id="send">Send</button>
+    <button id="scratchpad-btn" style="display:none;background:#e6a817;color:#1a1a1a;font-weight:bold" title="Open a temporary exploratory workspace">Scratchpad</button>
   </div>
 
   <script>
@@ -213,6 +226,7 @@ export class ChatPanel extends WebviewBase {
     const confirmAcceptBtn = document.getElementById('confirm-accept');
     const cancelAcceptBtn = document.getElementById('cancel-accept');
     const snapshotEl = document.getElementById('project-snapshot');
+    const scratchpadBtn = document.getElementById('scratchpad-btn');
 
     function renderSnapshot(snapshot) {
       if (!snapshot) { snapshotEl.style.display = 'none'; return; }
@@ -566,6 +580,7 @@ export class ChatPanel extends WebviewBase {
           });
         }
         if (msg.snapshot) renderSnapshot(msg.snapshot);
+        scratchpadBtn.style.display = msg.mode === 'steering' ? '' : 'none';
         scrollToBottom();
       }
       if (msg.type === 'assistantMessage') {
@@ -580,6 +595,7 @@ export class ChatPanel extends WebviewBase {
         modeBar.textContent = msg.mode === 'kickoff' ? 'Setting up project...' : 'Project Chat';
         inputEl.placeholder = msg.mode === 'kickoff' ? 'Describe your project...' : 'Create tasks, ask questions...';
         draftSection.style.display = 'none';
+        scratchpadBtn.style.display = msg.mode === 'steering' ? '' : 'none';
       }
       if (msg.type === 'postAcceptTasks') {
         msg.tasks.forEach(task => {
@@ -686,6 +702,10 @@ export class ChatPanel extends WebviewBase {
       }
     });
 
+    scratchpadBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openScratchpad' });
+    });
+
     acceptBtn.addEventListener('click', () => {
       acceptBtn.style.display = 'none';
       confirmSection.style.display = '';
@@ -737,6 +757,8 @@ export class ChatPanel extends WebviewBase {
       await this.handleReviewDelta(msg.operations);
     } else if (msg.type === 'confirmMemory' && msg.entry) {
       await this.handleConfirmMemory(msg.entry);
+    } else if (msg.type === 'openScratchpad') {
+      vscode.commands.executeCommand('morticus.openScratchpad');
     }
   }
 
@@ -919,29 +941,37 @@ export class ChatPanel extends WebviewBase {
     }
   }
 
+  // Shared helper: creates a TaskNode from a DraftTask, saves it, drains pendingSuggestedTasks.
+  // Returns the created task for callers that need to continue (e.g. compile + run).
+  private async createTaskFromDraft(draft: DraftTask): Promise<import('../../domain/task.js').TaskNode> {
+    const project = await this.store.getProject();
+    const currentVersion = await this.store.state.getCurrentVersion();
+    const readOnly = draft.taskType === 'discovery' || draft.taskType === 'validation';
+
+    const task = createTask(
+      generateTaskId(),
+      project.id,
+      draft.title,
+      draft.goal,
+      draft.taskType,
+      { paths: draft.scopePaths, readOnly, writePermissions: [] },
+      currentVersion,
+    );
+    await this.store.tasks.save(task);
+
+    // Drain from pendingSuggestedTasks if this was a suggested task
+    if (draft.suggestionId && this.session) {
+      this.session.pendingSuggestedTasks = this.session.pendingSuggestedTasks
+        .filter(t => t.suggestionId !== draft.suggestionId);
+      await this.store.chat.save(this.session);
+    }
+
+    return task;
+  }
+
   private async handleConfirmTask(draft: DraftTask): Promise<void> {
     try {
-      const project = await this.store.getProject();
-      const currentVersion = await this.store.state.getCurrentVersion();
-      const readOnly = draft.taskType === 'discovery' || draft.taskType === 'validation';
-
-      const task = createTask(
-        generateTaskId(),
-        project.id,
-        draft.title,
-        draft.goal,
-        draft.taskType,
-        { paths: draft.scopePaths, readOnly, writePermissions: [] },
-        currentVersion,
-      );
-      await this.store.tasks.save(task);
-
-      // Drain from pendingSuggestedTasks if this was a suggested task
-      if (draft.suggestionId && this.session) {
-        this.session.pendingSuggestedTasks = this.session.pendingSuggestedTasks
-          .filter(t => t.suggestionId !== draft.suggestionId);
-        await this.store.chat.save(this.session);
-      }
+      const task = await this.createTaskFromDraft(draft);
 
       // Non-optimistic: notify webview of success with task ID
       this.postMessage({
@@ -1021,6 +1051,8 @@ export class ChatPanel extends WebviewBase {
         active: true,
         reviewed: true,
         normalizedValue: null,
+        sourceArchiveId: null,
+        memCellId: null,
         sourceTaskId: null,
         sourceRunId: null,
         sourceDeltaId: null,
@@ -1034,7 +1066,7 @@ export class ChatPanel extends WebviewBase {
     }
   }
 
-  // --- Phase 6: Public methods for cross-panel communication ---
+  // --- Public methods for cross-panel communication ---
 
   public postSystemMessage(text: string): void {
     this.postMessage({ type: 'systemMessage', text });
@@ -1045,6 +1077,30 @@ export class ChatPanel extends WebviewBase {
     if (snapshot) {
       this.postMessage({ type: 'projectSnapshot', snapshot });
     }
+  }
+
+  // Show a draft task card in chat from an external source (e.g. scratchpad handoff).
+  // The card has the standard Confirm/Edit/Cancel buttons — user must confirm before task is created.
+  public injectDraftTask(draft: DraftTask): void {
+    const assistantMsg: ChatMessage = {
+      id: generateChatMessageId(),
+      role: 'assistant',
+      content: `Scratchpad handoff produced a candidate task: "${draft.title}"`,
+      timestamp: new Date().toISOString(),
+      draftTask: draft,
+    };
+    if (this.session) {
+      this.session.messages.push(assistantMsg);
+      this.store.chat.save(this.session);
+    }
+    this.postMessage({ type: 'assistantMessage', message: assistantMsg });
+  }
+
+  // Route a candidate delta to the ReviewPanel via the existing review flow.
+  // Used by scratchpad handoff — does NOT display anything in chat, goes straight to review.
+  public async routeDeltaToReview(operations: Array<{ type: string; value?: string; path?: string }>): Promise<void> {
+    const typed = operations as DeltaOperation[];
+    await this.handleReviewDelta(typed);
   }
 
   private async buildProjectSnapshot(): Promise<ProjectSnapshot | null> {
@@ -1069,35 +1125,16 @@ export class ChatPanel extends WebviewBase {
 
   private async handleConfirmAndRunTask(draft: DraftTask): Promise<void> {
     try {
-      // 1. Create task (same logic as handleConfirmTask)
-      const project = await this.store.getProject();
-      const currentVersion = await this.store.state.getCurrentVersion();
-      const readOnly = draft.taskType === 'discovery' || draft.taskType === 'validation';
-
-      const task = createTask(
-        generateTaskId(),
-        project.id,
-        draft.title,
-        draft.goal,
-        draft.taskType,
-        { paths: draft.scopePaths, readOnly, writePermissions: [] },
-        currentVersion,
-      );
-      await this.store.tasks.save(task);
-
-      // Drain from pendingSuggestedTasks if applicable
-      if (draft.suggestionId && this.session) {
-        this.session.pendingSuggestedTasks = this.session.pendingSuggestedTasks
-          .filter(t => t.suggestionId !== draft.suggestionId);
-        await this.store.chat.save(this.session);
-      }
+      // 1. Create task
+      const task = await this.createTaskFromDraft(draft);
 
       this.postMessage({ type: 'taskRunProgress', text: 'Compiling spec...' });
 
       // 2. Compile spec
       const state = await this.store.state.getCurrentState();
       const memory = await this.store.memory.get();
-      const spec = resolveTaskSpec(task, state, memory);
+      const memCells = await this.store.memcells.list();
+      const spec = resolveTaskSpec(task, state, memory, {}, memCells);
       await this.store.specs.save(spec);
 
       const readyTask = transitionTask(

@@ -30,8 +30,10 @@
       { "command": "morticus.editTask", "title": "Edit Task", "category": "Morticus", "icon": "$(edit)" },
       { "command": "morticus.openChat", "title": "Open Chat", "category": "Morticus", "icon": "$(comment-discussion)" },
       { "command": "morticus.openTaskDetail", "title": "Open Task Detail", "category": "Morticus", "icon": "$(symbol-class)" },
+      { "command": "morticus.openScratchpad", "title": "Open Scratchpad", "category": "Morticus", "icon": "$(note)" },
       { "command": "morticus.resumeFromVersion", "title": "Resume from State Version", "category": "Morticus", "icon": "$(history)" },
-      { "command": "morticus.createCheckpoint", "title": "Create Checkpoint", "category": "Morticus", "icon": "$(bookmark)" }
+      { "command": "morticus.createCheckpoint", "title": "Create Checkpoint", "category": "Morticus", "icon": "$(bookmark)" },
+      { "command": "morticus.importTranscript", "title": "Import Transcript", "category": "Morticus", "icon": "$(cloud-download)" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -75,6 +77,26 @@
         { "command": "morticus.retryTask", "when": "view == morticus-tasks && viewItem =~ /task-(rejected|archived)/" },
         { "command": "morticus.openRunDetail", "when": "view == morticus-runs" }
       ]
+    },
+    "configuration": {
+      "title": "Morticus",
+      "properties": {
+        "morticus.llmProvider": {
+          "type": "string",
+          "default": "codex",
+          "enum": ["claude", "codex"],
+          "enumDescriptions": [
+            "Claude CLI (claude --print)",
+            "OpenAI Codex CLI (codex exec)"
+          ],
+          "description": "LLM provider for task execution, chat, and memory extraction."
+        },
+        "morticus.llmModel": {
+          "type": "string",
+          "default": "gpt-5.4",
+          "description": "Model override for the LLM provider (e.g., 'o4-mini' for Codex, 'sonnet' for Claude). Leave empty for provider default."
+        }
+      }
     }
   },
   "scripts": {

@@ -545,3 +545,223 @@ Four workstreams completing the chat intelligence features and adding a task wor
 - Tests cover: parentVersion lineage, getNextVersion/setCurrentVersion, checkpoint CRUD, resume orchestration, schema migration v1→v2, plus integrated corner cases: resume→accept delta→correct version+parentVersion, multiple sequential resumes, checkpoint persistence across resumes, current pointer coherence
 - Build: 194KB
 - Lint: clean
+
+---
+
+## 2026-03-20: Phase 6 — Scratchpad Mode v1
+
+**Problem**: When users need to brainstorm, research alternatives, or explore "what if" scenarios, doing so in the main chat risks polluting the strategic trunk with exploratory noise. There's no way to think freely and then selectively bring back only the useful conclusions.
+
+**What was built**:
+
+A temporary exploratory side-workspace ("scratchpad") that is structurally separate from the main chat. The scratchpad has its own session, adapter, and storage. Normal turns produce response-only output (no mutation parsing) — mutations are structurally impossible during exploration. Only a structured handoff crosses back to the main chat.
+
+1. **Domain types** (`src/domain/scratchpad.ts`, `src/domain/ids.ts`):
+   - `ScratchpadSession` with id, parentChatSessionId, parentContextSummary, origin, status, messages, handoff
+   - `ScratchpadHandoff` — summary, keyFindings, unresolvedQuestions, optional candidateTask, optional candidateDelta (no candidateMemory in v1)
+   - `ScratchpadOrigin` — goal/phase/phaseGoal frozen at spawn time
+   - `parseScratchpadHandoff()` — defensive parser handling missing/malformed fields from Claude output
+   - `ScratchpadId` branded type and `generateScratchpadId()`
+
+2. **Storage** (`src/storage/scratchpad-store.ts`, `src/storage/store.ts`):
+   - One file per session at `.morticus/scratchpad/<id>.json`
+   - `getActive()` returns the single active session (v1: one at a time)
+   - Wired into `ProjectStore.scratchpad`
+
+3. **Runtime adapter** (`src/runtime/scratchpad-adapter.ts`, `src/runtime/chat-adapter.ts`):
+   - `sendScratchpadTurn()` — response only, no structured output parsing
+   - `requestScratchpadHandoff()` — requests and parses structured handoff
+   - Separate markers: `---MORTICUS-SCRATCHPAD-HANDOFF-START/END---`
+   - `buildParentContextSummary()` — compiles compact frozen context from state, memory, recent messages, task context
+
+4. **Scratchpad panel** (`src/ui/webviews/scratchpad-panel.ts`):
+   - Amber/orange visual theme for clear differentiation from main chat
+   - Origin chip showing "From: Main Chat", goal snippet, phase
+   - "End Scratchpad" button triggers handoff generation
+   - Handoff card with action buttons: Create Task, Send to Review, Archive, Discard, Continue Exploring
+   - Auto-archive on panel close without handoff (with informational toast)
+   - `ScratchpadHandoffAction` discriminated union type for dispatching actions back to commands
+
+5. **Chat panel integration** (`src/ui/webviews/chat-panel.ts`):
+   - `injectDraftTask()` — injects candidate task card from external source (e.g. scratchpad handoff)
+   - `routeDeltaToReview()` — routes delta through existing review flow
+   - "Scratchpad" button in input area (steering mode only, amber-themed)
+   - `openScratchpad` message handler fires the VS Code command
+
+6. **Command wiring** (`src/ui/commands.ts`, `package.json`):
+   - `morticus.openScratchpad` — checks for existing active scratchpad (reopens) or creates new session with frozen parent context
+   - Handoff action routing: create_task → injects into chat, send_draft_update → routes through existing ReviewPanel, archive → system message, discard → toast
+
+### Key design choices
+
+- **Structurally separate from main chat**: Scratchpad has its own session, adapter, and storage. Not a new mode on the existing ChatSession.
+- **Response-only adapter**: `sendScratchpadTurn()` returns `{ response: string }` — no structured output parsing. Mutations are impossible by construction, not by instruction.
+- **Frozen parent context**: Context summary built at spawn time and never updated. The scratchpad sees a snapshot, not a live feed.
+- **Handoff as the only bridge**: Raw scratchpad transcript stays in the scratchpad. Only the structured handoff (summary, findings, questions, optional candidates) crosses back.
+- **Send to Review routes through existing flow**: `candidateDelta` in the handoff goes through `ChatPanel.routeDeltaToReview()` → `handleReviewDelta()` → ReviewPanel. No new review path.
+- **Auto-archive, not auto-discard**: If the user closes the panel via X without doing a handoff, the session is archived (not lost). They can reopen it later.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `src/domain/ids.ts` | +ScratchpadId, +generateScratchpadId |
+| `src/domain/scratchpad.ts` | NEW: ScratchpadSession, ScratchpadHandoff, ScratchpadOrigin, createScratchpadSession, parseScratchpadHandoff |
+| `src/storage/scratchpad-store.ts` | NEW: ScratchpadStore (save, get, getActive, list) |
+| `src/storage/store.ts` | +scratchpad sub-store |
+| `src/runtime/scratchpad-adapter.ts` | NEW: sendScratchpadTurn, requestScratchpadHandoff, parseScratchpadHandoffResponse |
+| `src/runtime/chat-adapter.ts` | +buildParentContextSummary |
+| `src/ui/webviews/scratchpad-panel.ts` | NEW: ScratchpadPanel, ScratchpadHandoffAction |
+| `src/ui/webviews/chat-panel.ts` | +injectDraftTask, +routeDeltaToReview, +scratchpad button, +openScratchpad handler |
+| `src/ui/commands.ts` | +morticus.openScratchpad command with full handoff routing |
+| `package.json` | +openScratchpad command |
+
+### Validation
+
+- 20 new tests (scratchpad domain: 8, adapter handoff parsing: 6, buildParentContextSummary: 6)
+- 326 total tests, all passing (<1s)
+- Build: 227KB, 24ms
+- Lint: clean
+
+---
+
+## 2026-03-19: Chat Home Surface — Tightening Pass
+
+**Problem**: The "Chat as Coherent Home Surface" implementation had several rough edges discovered during review.
+
+**Issues found and fixed**:
+
+1. **`ProjectSnapshot` in wrong layer**: Was defined in `src/domain/chat.ts` but is purely a view model — never stored, never used by runtime/compiler/review. Moved to `src/ui/webviews/chat-panel.ts` as a local interface.
+
+2. **Task creation logic duplicated**: `handleConfirmTask()` and `handleConfirmAndRunTask()` duplicated 15 lines of task creation (get project, compute readOnly, createTask, save, drain pendingSuggestedTasks). Extracted `createTaskFromDraft()` shared helper. Both methods now call it.
+
+3. **Snapshot not refreshed on reject**: `createReviewPanel()` in commands.ts called `chatPanel.refreshSnapshot()` on accept but NOT on reject. After rejection, `awaitingReviewCount` in the snapshot became stale. Added `refreshSnapshot()` to the reject branch.
+
+4. **Task status stuck after review**: ReviewPanel accepted/rejected the *delta* but never transitioned the *task*. Tasks remained in `awaiting_review` forever after review. Added `transitionTask(task, 'merged')` on accept and `transitionTask(task, 'rejected')` on reject (only when `delta.taskId` is non-null and task is still `awaiting_review`).
+
+5. **Phase numbering drift in docs**: todo.md had phases in chaotic order (5A → 6 → 4B.3 → 4B → 4C → 5). Reorganized into logical order. Removed fake "Phase 6" numbering — this is "Chat as Coherent Home Surface" without a phase number since it's an intermediate strengthening step, not a roadmap phase. Updated roadmap.md current state and sequencing to reflect reality.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `src/domain/chat.ts` | Removed `ProjectSnapshot` interface |
+| `src/ui/webviews/chat-panel.ts` | +local `ProjectSnapshot` interface, +`createTaskFromDraft()` helper, simplified `handleConfirmTask` and `handleConfirmAndRunTask` |
+| `src/ui/webviews/review-panel.ts` | +`transitionTask` import, +task→merged on accept, +task→rejected on reject |
+| `src/ui/commands.ts` | +`chatPanel.refreshSnapshot()` on reject branch |
+| `docs/todo.md` | Reorganized phase order, unnumbered "Chat as Home Surface", updated entries |
+| `docs/build-log.md` | +tightening pass entry |
+| `roadmap.md` | Updated current state, gaps, sequencing |
+
+## 2026-03-20: Phase 9 — Context Slicing and Cost Governance
+
+### What was built
+
+Per-surface context policies that control which state fields, memory entries, and token budgets are used for each context surface (task runs, chat steering, chat kickoff, scratchpad). Scope-based filtering narrows knownFiles, decisions, and risks to task-relevant subsets. Keyword-based relevance scoring filters memory entries. Context manifests record what was included/excluded and why, persisted into run metrics for debugging.
+
+### Key design decisions
+
+1. **Pure domain layer**: All context policy types and scoring functions live in `src/domain/context-policy.ts` with zero external dependencies. Profiles are resolved deterministically from surface + task type + scope paths.
+
+2. **Profile-driven, override-friendly**: `resolveContextProfile()` returns default settings per surface. `spec-resolver.ts` maps profiles to `ContextPackOptions`, but callers can still override individual fields. No breaking changes to existing call sites.
+
+3. **Scope filtering is path-based for files, keyword-based for text**: `filterByScope()` uses path prefix matching for knownFiles. `filterByScopeKeywords()` tokenizes scope paths and matches by keyword overlap for decisions/risks — appropriate since these are natural language.
+
+4. **Relevance scoring is deterministic**: `scoreKeywordRelevance()` tokenizes text, removes stopwords, and counts keyword matches. No LLM. Threshold of 1 means "at least one keyword must match."
+
+5. **Manifest for observability**: Every context pack now carries a `ContextManifest` recording: which state fields were included/excluded, scope filter effects, memory inclusion/exclusion with reasons, and any trimming applied. `buildContextDiagnostics()` renders this as human-readable text, persisted in `ContextMetrics.contextDiagnostics`.
+
+### Profile defaults
+
+| Surface | Tokens | Decisions | Risks | KnownFiles | ExitCriteria | Memory | Scope filter |
+|---|---|---|---|---|---|---|---|
+| task_run (discovery) | 8K | No | No | Yes | No | excl. test_convention | If scope paths |
+| task_run (implementation) | 16K | Yes | Yes | Yes | No | All | If scope paths |
+| task_run (validation) | 12K | Yes | No | Yes | Yes | excl. domain_glossary | If scope paths |
+| chat_steering | 6K sys / 12K conv | Yes | Yes | Yes | Yes | Max 20 | No |
+| chat_kickoff | 2K sys / 12K conv | No | No | No | No | All | No |
+| scratchpad | 4K | No | No | No | No | Max 15 | No |
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `src/domain/context-policy.ts` | NEW: types + pure scoring/filtering/profile functions |
+| `src/domain/task-spec.ts` | +`includePhaseExitCriteria`, `memoryRelevanceThreshold`, `relevanceKeywords`, scope filter options on `ContextPackOptions`; +`contextManifest` on `ContextPack` |
+| `src/domain/task-run.ts` | +`memoryIncluded`, `memoryExcluded`, `contextDiagnostics` on `ContextMetrics` |
+| `src/domain/chat.ts` | +`contextTokenEstimate` on `ChatTurnResult` |
+| `src/compiler/context-pack.ts` | Scope filtering, relevance scoring, manifest generation, phaseExitCriteria, exported `buildStateSummary` |
+| `src/compiler/spec-resolver.ts` | Uses `resolveContextProfile` + `extractRelevanceKeywords` instead of hardcoded defaults |
+| `src/runtime/chat-adapter.ts` | Profile-driven memory limiting, conversation token budget, context token estimate |
+| `src/runtime/scratchpad-adapter.ts` | Profile-driven memory limiting |
+| `src/runtime/run-controller.ts` | Persists manifest diagnostics into `ContextMetrics` |
+| `src/ui/webviews/run-detail-panel.ts` | Displays memory counts, expandable context diagnostics |
+| `test/unit/domain/context-policy.test.ts` | NEW: 23 tests |
+| `test/unit/compiler/context-pack.test.ts` | +11 tests (scope filtering, relevance scoring, manifest, phaseExitCriteria) |
+| `test/unit/compiler/spec-resolver.test.ts` | Updated 2 tests to isolate category filtering from relevance filtering |
+
+### Metrics
+
+- Tests: 362 (was 328, +34)
+- Bundle: 244KB
+- Lint: clean
+
+## 2026-03-21: Phase 8A — Transcript Import / Migration with Minimal Archive Foundation
+
+### What was built
+
+End-to-end import pipeline for bringing external transcripts and planning docs into Morticus's structured model. Users can import `.md` or `.txt` files, have them parsed deterministically into chunks, extract structured project data via Claude, review and selectively accept state, memory entries, and tasks — all through a multi-step wizard webview. Raw imported content is archived for later retrieval.
+
+### Key design decisions
+
+1. **Import never auto-applies**: Everything goes through review. State changes route through the existing ReviewPanel (for post-kickoff) or create initial state directly (pre-kickoff). Memory entries are created as `active: false, reviewed: false`. Tasks appear as draft cards in chat.
+
+2. **Deterministic parse + LLM extract**: The pipeline splits cleanly. Parsers are pure functions (no LLM) that detect format and chunk content. Extraction uses a single-shot Claude call with structured markers, reusing existing sanitizers (`sanitizeDraftState`, `sanitizeDraftTask`, `sanitizeDraftMemoryEntry`) for defensive parsing.
+
+3. **Bookend strategy for large transcripts**: If estimated tokens exceed 30K, the extractor takes chunks from the beginning and end (~15K each), runs a primary extraction, then processes overflow chunks with the summary from pass 1 as context. Pass 2 failures are non-fatal.
+
+4. **Conflict detection is pure**: `detectImportConflicts()` compares imported draft state against existing canonical state. Scalar fields use word-overlap scoring for severity (override/warning/info). Array fields check for exact-match duplicates (case-insensitive).
+
+5. **Archive as persistent artifact**: Each import creates an `ArchiveRecord` with metadata, chunks, extraction results, conflicts, and acceptance log. Raw content stored separately as `source.txt`. Storage layout: `.morticus/archive/<archiveId>/record.json` + `source.txt`.
+
+6. **Schema migration v2→v3**: Adds `sourceArchiveId: null` to all existing memory entries. Idempotent — skips entries that already have the field.
+
+### Import flow
+
+1. User runs `Morticus: Import Transcript` → file picker (`.md`, `.txt`)
+2. Parse: format auto-detected (markdown transcript, text chat dump, planning doc), content chunked
+3. Preview: source info, chunk preview in ImportPanel
+4. Extract: Claude call with extraction prompt → structured JSON parsed with defensive sanitizers
+5. Review: state fields (with conflict badges), memory entries (with duplicate detection), tasks — all with checkboxes
+6. Apply: selected items route through appropriate paths (delta review, memory store, draft task injection)
+7. Archive: record persisted with acceptance log, chat receives summary message
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `src/domain/import.ts` | NEW: all import domain types + `createArchiveRecord()` factory |
+| `src/domain/ids.ts` | +`ArchiveId` branded type + `generateArchiveId()` |
+| `src/domain/durable-memory.ts` | +`'imported'` origin, +`sourceArchiveId` field |
+| `src/domain/errors.ts` | +`IMPORT_PARSE_ERROR`, `IMPORT_EXTRACTION_ERROR` |
+| `src/runtime/transcript-parser.ts` | NEW: `detectImportFormat`, `parseMarkdownTranscript`, `parseTextChatDump`, `parsePlanningDoc`, `parseImportSource` |
+| `src/runtime/import-extractor.ts` | NEW: extraction prompt, response parsing, bookend chunking strategy |
+| `src/runtime/import-conflict-detector.ts` | NEW: pure conflict detection with word-overlap severity scoring |
+| `src/runtime/chat-adapter.ts` | Exported `sanitizeDraftState`, `sanitizeDraftTask` |
+| `src/storage/archive-store.ts` | NEW: `ArchiveStore` (save, get, list, saveRawContent, getRawContent) |
+| `src/storage/store.ts` | +`archive: ArchiveStore` on ProjectStore |
+| `src/storage/migrator.ts` | v2→v3 migration for `sourceArchiveId` backfill, `CURRENT_SCHEMA_VERSION = 3` |
+| `src/ui/webviews/import-panel.ts` | NEW: multi-step import wizard webview |
+| `src/ui/commands.ts` | +`morticus.importTranscript` command wiring |
+| `package.json` | +command declaration |
+| `test/unit/domain/import.test.ts` | NEW: 3 tests |
+| `test/unit/runtime/transcript-parser.test.ts` | NEW: 55 tests |
+| `test/unit/runtime/import-extractor.test.ts` | NEW: 13 tests |
+| `test/unit/runtime/import-conflict-detector.test.ts` | NEW: 13 tests |
+| `test/unit/storage/migrator.test.ts` | +3 tests (v2→v3 migration) |
+
+### Metrics
+
+- Tests: 449 (was 362, +87)
+- Bundle: 289KB
+- Lint: clean

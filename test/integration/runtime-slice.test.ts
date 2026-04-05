@@ -9,14 +9,15 @@ import { resolveTaskSpec } from '../../src/compiler/spec-resolver.js';
 import { createEmptyMemory } from '../../src/domain/durable-memory.js';
 import { RunController } from '../../src/runtime/run-controller.js';
 
-// Mock claude-adapter so we don't need a real Claude CLI binary.
+// Mock llm-provider so we don't need a real CLI binary.
 // Everything else (store, task transitions, delta building, state) is real.
-vi.mock('../../src/runtime/claude-adapter.js', () => ({
-  runClaude: vi.fn(),
+vi.mock('../../src/runtime/llm-provider.js', () => ({
+  runLlm: vi.fn(),
+  getConfiguredProvider: vi.fn(() => 'claude'),
 }));
 
-import { runClaude } from '../../src/runtime/claude-adapter.js';
-const mockRunClaude = vi.mocked(runClaude);
+import { runLlm } from '../../src/runtime/llm-provider.js';
+const mockRunLlm = vi.mocked(runLlm);
 
 const START = '---MORTICUS-OUTPUT-START---';
 const END = '---MORTICUS-OUTPUT-END---';
@@ -66,7 +67,7 @@ describe('Runtime slice: RunController integration', () => {
   });
 
   it('completes full run lifecycle and transitions task to awaiting_review', async () => {
-    mockRunClaude.mockResolvedValue({
+    mockRunLlm.mockResolvedValue({
       stdout: makeClaudeOutput(),
       exitCode: 0,
       timedOut: false,
@@ -103,7 +104,7 @@ describe('Runtime slice: RunController integration', () => {
   });
 
   it('persists run.json, output.json, and normalized.json to disk', async () => {
-    mockRunClaude.mockResolvedValue({
+    mockRunLlm.mockResolvedValue({
       stdout: makeClaudeOutput(),
       exitCode: 0,
       timedOut: false,
@@ -136,7 +137,7 @@ describe('Runtime slice: RunController integration', () => {
   });
 
   it('task transitions to awaiting_review after run', async () => {
-    mockRunClaude.mockResolvedValue({
+    mockRunLlm.mockResolvedValue({
       stdout: makeClaudeOutput(),
       exitCode: 0,
       timedOut: false,
@@ -164,7 +165,7 @@ describe('Runtime slice: RunController integration', () => {
   });
 
   it('delta carries confidence from normalized output', async () => {
-    mockRunClaude.mockResolvedValue({
+    mockRunLlm.mockResolvedValue({
       stdout: makeClaudeOutput({ confidence: 0.75 }),
       exitCode: 0,
       timedOut: false,
@@ -187,7 +188,7 @@ describe('Runtime slice: RunController integration', () => {
   });
 
   it('marks run as failed and re-throws when claude adapter throws', async () => {
-    mockRunClaude.mockRejectedValue(new Error('Claude CLI not found'));
+    mockRunLlm.mockRejectedValue(new Error('Claude CLI not found'));
 
     const state = await store.state.getCurrentState();
     const memory = createEmptyMemory();
@@ -212,7 +213,7 @@ describe('Runtime slice: RunController integration', () => {
   });
 
   it('handles zero-confidence output gracefully (no structured block)', async () => {
-    mockRunClaude.mockResolvedValue({
+    mockRunLlm.mockResolvedValue({
       stdout: 'Claude had nothing to say here. No structured block.',
       exitCode: 0,
       timedOut: false,

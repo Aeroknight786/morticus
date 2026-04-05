@@ -12,7 +12,9 @@ export type ErrorCode =
   | 'TASK_NOT_FOUND'
   | 'PROJECT_ALREADY_EXISTS'
   | 'SCHEMA_VERSION_TOO_NEW'
-  | 'MIGRATION_ERROR';
+  | 'MIGRATION_ERROR'
+  | 'IMPORT_PARSE_ERROR'
+  | 'IMPORT_EXTRACTION_ERROR';
 
 export class MorticusError extends Error {
   constructor(

@@ -1,8 +1,12 @@
 import * as vscode from 'vscode';
 import { ProjectStore } from '../storage/store.js';
-import { generateTaskId } from '../domain/ids.js';
+import { generateTaskId, generateScratchpadId, generateDeltaId } from '../domain/ids.js';
 import { createTask, createRetryTask, transitionTask, type TaskType, type TaskStatus } from '../domain/task.js';
+import { createScratchpadSession } from '../domain/scratchpad.js';
 import { resolveTaskSpec } from '../compiler/spec-resolver.js';
+import { buildParentContextSummary } from '../runtime/chat-adapter.js';
+import { createStateDelta, type DeltaOperation } from '../domain/state-delta.js';
+import { validateDelta } from '../review/validator.js';
 import { StateTreeProvider } from './tree-views/state-tree-provider.js';
 import { TaskTreeProvider, TaskItem } from './tree-views/task-tree-provider.js';
 import { MemoryTreeProvider } from './tree-views/memory-tree-provider.js';
@@ -14,12 +18,21 @@ import { HistoryPanel } from './webviews/history-panel.js';
 import { RunDetailPanel } from './webviews/run-detail-panel.js';
 import { ChatPanel } from './webviews/chat-panel.js';
 import { TaskDetailPanel, type TaskDetailAction } from './webviews/task-detail-panel.js';
+import { ScratchpadPanel, type ScratchpadHandoffAction } from './webviews/scratchpad-panel.js';
 import { StatusBar } from './status-bar.js';
+import { ImportPanel } from './webviews/import-panel.js';
 import { RunController } from '../runtime/index.js';
 import type { MemoryCategory } from '../domain/durable-memory.js';
 import { generateMemoryEntryId, generateCheckpointId } from '../domain/ids.js';
 import type { StateVersion } from '../domain/ids.js';
 import { resumeFromVersion } from '../review/resume-orchestrator.js';
+import { applyImportedInitialState } from '../runtime/import-state.js';
+import {
+  routeImportedTaskToChat,
+  routeDeltaToReviewSurface,
+  routeScratchpadTaskToChat,
+  routeScratchpadDeltaToSurfaces,
+} from './handoff-routing.js';
 
 export function registerCommands(
   context: vscode.ExtensionContext,
@@ -36,6 +49,7 @@ export function registerCommands(
   let historyPanel: HistoryPanel | undefined;
   let chatPanel: ChatPanel | undefined;
   let taskDetailPanel: TaskDetailPanel | undefined;
+  let scratchpadPanel: ScratchpadPanel | undefined;
 
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
 
@@ -55,9 +69,49 @@ export function registerCommands(
           chatPanel.refreshSnapshot();
         } else {
           chatPanel.postSystemMessage(`Delta rejected${outcome.taskTitle ? ` for task: ${outcome.taskTitle}` : ''}.`);
+          chatPanel.refreshSnapshot();
         }
       }
     });
+  }
+
+  async function ensureChatPanel(): Promise<ChatPanel> {
+    if (!chatPanel) {
+      chatPanel = new ChatPanel(context.extensionUri, store, workspaceRoot, refreshAll, async (delta) => {
+        const panel = await ensureReviewPanel();
+        await panel.showDelta(delta);
+      }, async (delta, normalized) => {
+        const panel = await ensureReviewPanel();
+        await panel.showRun(delta, normalized);
+      });
+    }
+    await chatPanel.showChat();
+    return chatPanel;
+  }
+
+  async function ensureReviewPanel(): Promise<ReviewPanel> {
+    if (!reviewPanel) {
+      reviewPanel = createReviewPanel();
+    }
+    return reviewPanel;
+  }
+
+  async function presentDeltaReview(
+    operations: Array<{ type: string; value?: string; path?: string }>,
+  ): Promise<void> {
+    const currentState = await store.state.getCurrentState();
+    const delta = createStateDelta(
+      generateDeltaId(),
+      null,
+      currentState.version,
+      operations as DeltaOperation[],
+    );
+    delta.confidence = 1.0;
+    delta.conflicts = validateDelta(delta, currentState);
+    await store.deltas.save(delta);
+
+    const panel = await ensureReviewPanel();
+    await panel.showDelta(delta);
   }
 
   // Initialize Project
@@ -145,7 +199,8 @@ export function registerCommands(
       try {
         const state = await store.state.getCurrentState();
         const memory = await store.memory.get();
-        const spec = resolveTaskSpec(task, state, memory);
+        const memCells = await store.memcells.list();
+        const spec = resolveTaskSpec(task, state, memory, {}, memCells);
         await store.specs.save(spec);
 
         const updated = { ...task, specId: spec.id, updatedAt: new Date().toISOString() };
@@ -278,6 +333,8 @@ export function registerCommands(
           active: true,
           reviewed: true,
           normalizedValue: null,
+          sourceArchiveId: null,
+          memCellId: null,
           sourceTaskId: null,
           sourceRunId: null,
           sourceDeltaId: null,
@@ -449,18 +506,101 @@ export function registerCommands(
     vscode.commands.registerCommand('morticus.openChat', async () => {
       if (!chatPanel) {
         chatPanel = new ChatPanel(context.extensionUri, store, workspaceRoot, refreshAll, async (delta) => {
-          if (!reviewPanel) {
-            reviewPanel = createReviewPanel();
-          }
-          await reviewPanel.showDelta(delta);
+          const panel = await ensureReviewPanel();
+          await panel.showDelta(delta);
         }, async (delta, normalized) => {
-          if (!reviewPanel) {
-            reviewPanel = createReviewPanel();
-          }
-          await reviewPanel.showRun(delta, normalized);
+          const panel = await ensureReviewPanel();
+          await panel.showRun(delta, normalized);
         });
       }
       await chatPanel.showChat();
+    }),
+  );
+
+  // Open Scratchpad
+  context.subscriptions.push(
+    vscode.commands.registerCommand('morticus.openScratchpad', async () => {
+      try {
+        // Check for existing active scratchpad
+        let session = await store.scratchpad.getActive();
+
+        if (!session) {
+          // Build frozen parent context at spawn time
+          let state = null;
+          try {
+            const current = await store.state.getCurrentState();
+            if (current.goal) state = current;
+          } catch { /* no state yet */ }
+
+          if (!state) {
+            vscode.window.showWarningMessage('Initialize project state before opening a scratchpad.');
+            return;
+          }
+
+          const memory = await store.memory.get();
+          const chatSession = await store.chat.get();
+          const recentMessages = chatSession ? chatSession.messages.slice(-10) : [];
+          const parentContextSummary = buildParentContextSummary(state, memory, recentMessages);
+
+          const origin = {
+            goal: state.goal,
+            phase: state.phase,
+            phaseGoal: state.phaseGoal,
+          };
+
+          session = createScratchpadSession(
+            generateScratchpadId(),
+            chatSession?.id ?? ('' as import('../domain/ids.js').ChatSessionId),
+            parentContextSummary,
+            origin,
+          );
+          await store.scratchpad.save(session);
+        }
+
+        async function handleHandoffAction(action: ScratchpadHandoffAction): Promise<void> {
+          if (action.type === 'create_task' && action.handoff.candidateTask) {
+            const ct = action.handoff.candidateTask;
+            await routeScratchpadTaskToChat(
+              action.handoff.summary,
+              {
+                title: ct.title,
+                goal: ct.goal,
+                taskType: ct.taskType,
+                scopePaths: ct.scopePaths,
+              },
+              ensureChatPanel,
+            );
+            vscode.window.showInformationMessage('Scratchpad handed off. Review candidate task in chat.');
+          } else if (action.type === 'send_draft_update' && action.handoff.candidateDelta) {
+            await routeScratchpadDeltaToSurfaces(
+              action.handoff.summary,
+              action.handoff.candidateDelta.operations,
+              ensureChatPanel,
+              presentDeltaReview,
+            );
+            vscode.window.showInformationMessage('Scratchpad handed off. Delta sent to review.');
+          } else if (action.type === 'archive') {
+            const panel = await ensureChatPanel();
+            panel.postSystemMessage(`Scratchpad archived: ${action.handoff.summary}`);
+            vscode.window.showInformationMessage('Scratchpad archived.');
+          } else if (action.type === 'discard') {
+            vscode.window.showInformationMessage('Scratchpad discarded.');
+          } else if (action.type === 'reopen') {
+            // Nothing to do — panel stays open, session reactivated
+          }
+          scratchpadPanel = undefined;
+        }
+
+        scratchpadPanel = new ScratchpadPanel(
+          context.extensionUri,
+          store,
+          workspaceRoot,
+          handleHandoffAction,
+        );
+        await scratchpadPanel.showScratchpad(session);
+      } catch (err) {
+        vscode.window.showErrorMessage(`Scratchpad failed: ${(err as Error).message}`);
+      }
     }),
   );
 
@@ -555,6 +695,46 @@ export function registerCommands(
       } catch (err) {
         vscode.window.showErrorMessage(`Checkpoint failed: ${(err as Error).message}`);
       }
+    }),
+  );
+
+  // Import Transcript
+  context.subscriptions.push(
+    vscode.commands.registerCommand('morticus.importTranscript', async () => {
+      const fileUri = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        filters: { 'Transcript Files': ['md', 'txt', 'jsonl'] },
+        openLabel: 'Import',
+      });
+      if (!fileUri || fileUri.length === 0) return;
+
+      const importPanel = new ImportPanel(
+        context.extensionUri,
+        store,
+        workspaceRoot,
+        {
+          onDeltaReview: async (operations) => {
+            await routeDeltaToReviewSurface(operations, presentDeltaReview);
+          },
+          onDraftTask: (draft) => {
+            return routeImportedTaskToChat(draft, ensureChatPanel);
+          },
+          onStateAccept: async (draft) => {
+            await applyImportedInitialState(store, draft);
+            vscode.commands.executeCommand('setContext', 'morticus.projectInitialized', true);
+            refreshAll();
+          },
+          onComplete: (summary) => {
+            if (chatPanel) {
+              chatPanel.postSystemMessage(summary);
+            }
+            vscode.window.showInformationMessage(summary);
+            refreshAll();
+          },
+        },
+      );
+
+      await importPanel.startImport(fileUri[0].fsPath);
     }),
   );
 

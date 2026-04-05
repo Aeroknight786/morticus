@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { resolveTaskSpec } from '../../../src/compiler/spec-resolver.js';
 import { createInitialState, applyDeltaOperations } from '../../../src/domain/canonical-state.js';
-import { createEmptyMemory } from '../../../src/domain/durable-memory.js';
-import type { DurableMemory, MemoryEntry } from '../../../src/domain/durable-memory.js';
+import { createEmptyMemory, createMemCell } from '../../../src/domain/durable-memory.js';
+import type { DurableMemory, MemoryEntry, MemCell } from '../../../src/domain/durable-memory.js';
 import { createTask } from '../../../src/domain/task.js';
-import { generateTaskId, generateProjectId, generateDeltaId, generateMemoryEntryId } from '../../../src/domain/ids.js';
+import { generateTaskId, generateProjectId, generateDeltaId, generateMemoryEntryId, generateMemCellId } from '../../../src/domain/ids.js';
 
 describe('resolveTaskSpec', () => {
   const projectId = generateProjectId();
@@ -133,6 +133,8 @@ describe('resolveTaskSpec', () => {
       sourceOperationType: null,
       reviewed: true,
       normalizedValue: null,
+      sourceArchiveId: null,
+      memCellId: null,
     });
     const memory: DurableMemory = {
       ...createEmptyMemory(),
@@ -147,7 +149,7 @@ describe('resolveTaskSpec', () => {
       'Find things', 'discovery',
       { paths: ['src/'], readOnly: true, writePermissions: [] }, 1,
     );
-    const spec = resolveTaskSpec(task, state, memory);
+    const spec = resolveTaskSpec(task, state, memory, { memoryRelevanceThreshold: null });
     expect(spec.contextPack.stablePrefix).toContain('CS');
     expect(spec.contextPack.stablePrefix).toContain('AI');
     expect(spec.contextPack.stablePrefix).not.toContain('TC');
@@ -171,6 +173,8 @@ describe('resolveTaskSpec', () => {
       sourceOperationType: null,
       reviewed: true,
       normalizedValue: null,
+      sourceArchiveId: null,
+      memCellId: null,
     });
     const memory: DurableMemory = {
       ...createEmptyMemory(),
@@ -184,8 +188,40 @@ describe('resolveTaskSpec', () => {
       'Run checks', 'validation',
       { paths: ['src/'], readOnly: true, writePermissions: [] }, 1,
     );
-    const spec = resolveTaskSpec(task, state, memory);
+    const spec = resolveTaskSpec(task, state, memory, { memoryRelevanceThreshold: null });
     expect(spec.contextPack.stablePrefix).toContain('CS');
     expect(spec.contextPack.stablePrefix).not.toContain('DG');
+  });
+
+  it('threads MemCells to context pack when provided', () => {
+    const state = createInitialState();
+    const memory = createEmptyMemory();
+    const cell: MemCell = {
+      ...createMemCell(generateMemCellId(), 'test', 'task_completed', 'raw', 100),
+      extracted: true,
+      episodicSummary: 'Auth middleware exploration results',
+      events: ['JWT chosen for auth tokens'],
+    };
+    const task = createTask(
+      generateTaskId(), projectId, 'Auth work',
+      'Implement auth middleware', 'implementation',
+      { paths: ['src/auth/'], readOnly: false, writePermissions: [] }, 1,
+    );
+    const spec = resolveTaskSpec(task, state, memory, {}, [cell]);
+    expect(spec.contextPack.contextManifest!.memCellsAvailable).toBe(1);
+    expect(spec.contextPack.stablePrefix).toContain('Auth middleware exploration');
+  });
+
+  it('works unchanged without MemCells (backward compat)', () => {
+    const state = createInitialState();
+    const memory = createEmptyMemory();
+    const task = createTask(
+      generateTaskId(), projectId, 'Basic',
+      'Test goal', 'discovery',
+      { paths: [], readOnly: true, writePermissions: [] }, 1,
+    );
+    const spec = resolveTaskSpec(task, state, memory);
+    expect(spec.contextPack.contextManifest!.memCellsAvailable).toBe(0);
+    expect(spec.contextPack.contextManifest!.memCellsIncluded).toBe(0);
   });
 });

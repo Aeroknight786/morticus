@@ -223,7 +223,7 @@ describe('v1→v2 migration: parentVersion backfill', () => {
     expect(v2.parentVersion).toBe(1);
 
     const proj = await readProject();
-    expect(proj.schemaVersion).toBe(2);
+    expect(proj.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
   });
 
   it('is idempotent — does not overwrite existing parentVersion', async () => {
@@ -243,6 +243,61 @@ describe('v1→v2 migration: parentVersion backfill', () => {
 
     const v1 = await readJson<Record<string, unknown>>(path.join(versionsDir, 'v001.json'));
     expect(v1.parentVersion).toBeNull();
+  });
+});
+
+describe('v2→v3 migration: sourceArchiveId backfill', () => {
+  it('adds sourceArchiveId: null to existing memory entries', async () => {
+    await writeProject({ schemaVersion: 2, name: 'Migrate Test' });
+
+    const memoryDir = path.join(morticusPath, 'memory');
+    await ensureDir(memoryDir);
+    await writeJson(path.join(memoryDir, 'entries.json'), {
+      version: 1,
+      entries: [
+        { id: 'mem_1', category: 'coding_standard', title: 'CS', content: 'c', normalizedValue: null },
+        { id: 'mem_2', category: 'architecture_invariant', title: 'AI', content: 'a', normalizedValue: null },
+      ],
+      updatedAt: '2025-01-01',
+    });
+
+    await runMigrations(morticusPath);
+
+    const memory = await readJson<Record<string, unknown>>(path.join(memoryDir, 'entries.json'));
+    const entries = memory.entries as Record<string, unknown>[];
+    expect(entries[0].sourceArchiveId).toBeNull();
+    expect(entries[1].sourceArchiveId).toBeNull();
+
+    const proj = await readProject();
+    expect(proj.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+  });
+
+  it('is idempotent — does not overwrite existing sourceArchiveId', async () => {
+    await writeProject({ schemaVersion: 2, name: 'Idempotent Test' });
+
+    const memoryDir = path.join(morticusPath, 'memory');
+    await ensureDir(memoryDir);
+    await writeJson(path.join(memoryDir, 'entries.json'), {
+      version: 1,
+      entries: [
+        { id: 'mem_1', sourceArchiveId: 'arch_existing' },
+      ],
+      updatedAt: '2025-01-01',
+    });
+
+    await runMigrations(morticusPath);
+
+    const memory = await readJson<Record<string, unknown>>(path.join(memoryDir, 'entries.json'));
+    const entries = memory.entries as Record<string, unknown>[];
+    expect(entries[0].sourceArchiveId).toBe('arch_existing');
+  });
+
+  it('handles missing memory file gracefully', async () => {
+    await writeProject({ schemaVersion: 2, name: 'No Memory' });
+    // No memory directory at all
+    await runMigrations(morticusPath);
+    const proj = await readProject();
+    expect(proj.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
   });
 });
 

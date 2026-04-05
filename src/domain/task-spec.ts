@@ -1,6 +1,7 @@
 import { SpecId, TaskId, StateVersion } from './ids.js';
 import type { WritePermission } from './task.js';
-import type { MemoryCategory } from './durable-memory.js';
+import type { MemoryCategory, MemoryType } from './durable-memory.js';
+import type { ContextManifest } from './context-policy.js';
 
 export interface TaskSpec {
   id: SpecId;
@@ -50,6 +51,9 @@ export interface ContextPack {
   // Lightweight cost tracking: estimated token count for this pack.
   // Based on character count / 4 (rough approximation). Not billed precision.
   estimatedTokens: number;
+
+  // What was included/excluded and why. Populated by the context compiler.
+  contextManifest: ContextManifest | null;
 }
 
 // Options that control what the context compiler includes.
@@ -61,6 +65,8 @@ export interface ContextPackOptions {
   includeDecisions: boolean;
   // Include known files list (default: true for discovery/validation, optional for implementation)
   includeKnownFiles: boolean;
+  // Include phase exit criteria in the state summary (default: false)
+  includePhaseExitCriteria: boolean;
   // Max memory entries to include (default: all active)
   maxMemoryEntries: number | null;
   // Only include these memory categories (default: null = all)
@@ -70,6 +76,22 @@ export interface ContextPackOptions {
   // Max estimated tokens for the context pack (default: null = no limit).
   // When exceeded, lower-priority content is trimmed progressively.
   maxTokens: number | null;
+  // Minimum keyword relevance score for memory entries (default: null = no filtering)
+  memoryRelevanceThreshold: number | null;
+  // Keywords for relevance scoring (from task goal + scope paths)
+  relevanceKeywords: string[];
+  // Scope-filter knownFiles by path prefix match
+  scopeFilterKnownFiles: boolean;
+  // Scope paths for filtering (from task scope)
+  scopePaths: string[];
+  // Scope-filter decisions by keyword overlap
+  scopeFilterDecisions: boolean;
+  // Scope-filter risks by keyword overlap
+  scopeFilterRisks: boolean;
+  // Preferred MemCell memory type (null = fuse both via RRF)
+  preferredMemCellType: MemoryType | null;
+  // Maximum MemCell results to supplement flat entries
+  maxMemCellResults: number;
 }
 
 // Intermediate type: what the user or LLM provides before deterministic compilation

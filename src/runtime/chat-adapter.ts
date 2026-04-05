@@ -1,8 +1,9 @@
 import type { CanonicalProjectState } from '../domain/canonical-state.js';
-import type { DurableMemory } from '../domain/durable-memory.js';
+import type { DurableMemory, MemoryEntry } from '../domain/durable-memory.js';
 import type { ChatMessage, ChatTurnResult, ChatMode, DraftCanonicalState, DraftTask, DraftMemoryEntry, TaskContext } from '../domain/chat.js';
-import type { DeltaOperation } from '../domain/state-delta.js';
-import { runClaude } from './claude-adapter.js';
+import { VALID_DELTA_OP_TYPES, type DeltaOperation } from '../domain/state-delta.js';
+import { runLlm } from './llm-provider.js';
+import { resolveContextProfile } from '../domain/context-policy.js';
 
 // Chat adapter: one function per turn.
 // Builds a prompt from state context + recent messages + system instructions,
@@ -151,8 +152,11 @@ export function buildStateSummary(state: CanonicalProjectState): string {
   return parts.join('\n\n');
 }
 
-function buildMemoryContext(memory: DurableMemory): string {
-  const active = memory.entries.filter(e => e.active);
+function buildMemoryContext(memory: DurableMemory, maxEntries: number | null = null): string {
+  let active: MemoryEntry[] = memory.entries.filter(e => e.active);
+  if (maxEntries !== null && active.length > maxEntries) {
+    active = active.slice(0, maxEntries);
+  }
   if (active.length === 0) return '';
   const lines = active.map(e => `[${e.category}] ${e.title}: ${e.content}`);
   return `## Project Memory\n\n${lines.join('\n\n')}`;
@@ -180,14 +184,13 @@ export function buildTaskContextSection(ctx: TaskContext): string {
   return `\n## Project Activity\n${parts.join('\n\n')}`;
 }
 
-export function formatMessages(messages: ChatMessage[]): string {
+export function formatMessages(messages: ChatMessage[], maxConversationTokens: number = 12_000): string {
   const maxMessages = 20;
-  const maxTokens = 12_000;
   let window = messages.slice(-maxMessages);
 
   // Trim from the front if over token budget
   let estimated = window.reduce((sum, m) => sum + Math.ceil(m.content.length / 4), 0);
-  while (estimated > maxTokens && window.length > 6) {
+  while (estimated > maxConversationTokens && window.length > 6) {
     window = window.slice(1);
     estimated = window.reduce((sum, m) => sum + Math.ceil(m.content.length / 4), 0);
   }
@@ -211,6 +214,8 @@ export async function sendChatTurn(
   options: ChatAdapterOptions,
   taskContext?: TaskContext,
 ): Promise<ChatTurnResult> {
+  const surface = mode === 'kickoff' ? 'chat_kickoff' : 'chat_steering';
+  const profile = resolveContextProfile(surface);
   const sections: string[] = [];
 
   // System prompt
@@ -222,24 +227,28 @@ export async function sendChatTurn(
     sections.push(buildSteeringSystemPrompt(stateSummary, taskCtxSection));
   }
 
-  // Memory context
-  const memoryCtx = buildMemoryContext(memory);
+  // Memory context (with profile-driven max entries)
+  const memoryCtx = buildMemoryContext(memory, profile.memorySlice.maxEntries);
   if (memoryCtx) sections.push(memoryCtx);
 
-  // Conversation history
+  // Conversation history (with profile-driven token budget)
+  const maxConvTokens = profile.tokenBudget.maxConversationTokens ?? 12_000;
   if (messages.length > 0) {
-    sections.push(`## Conversation\n\n${formatMessages(messages)}`);
+    sections.push(`## Conversation\n\n${formatMessages(messages, maxConvTokens)}`);
   }
 
   const prompt = sections.join('\n\n');
+  const contextTokenEstimate = Math.ceil(prompt.length / 4);
 
-  const result = await runClaude(prompt, {
+  const result = await runLlm(prompt, {
     workingDirectory: options.workingDirectory,
     timeoutMs: options.timeoutMs ?? 120_000,
     signal: options.signal,
   });
 
-  return parseChatTurnResult(result.stdout);
+  const turnResult = parseChatTurnResult(result.stdout);
+  turnResult.contextTokenEstimate = contextTokenEstimate;
+  return turnResult;
 }
 
 // ── Response parsing ──
@@ -319,7 +328,7 @@ export function parseChatTurnResult(raw: string): ChatTurnResult {
   }
 }
 
-function sanitizeDraftState(raw: Record<string, unknown>): DraftCanonicalState {
+export function sanitizeDraftState(raw: Record<string, unknown>): DraftCanonicalState {
   const draft: DraftCanonicalState = {};
   if (typeof raw.goal === 'string' && raw.goal) draft.goal = raw.goal;
   if (typeof raw.phase === 'string' && raw.phase) draft.phase = raw.phase;
@@ -332,7 +341,7 @@ function sanitizeDraftState(raw: Record<string, unknown>): DraftCanonicalState {
   return draft;
 }
 
-function sanitizeDraftTask(raw: Record<string, unknown>): DraftTask | undefined {
+export function sanitizeDraftTask(raw: Record<string, unknown>): DraftTask | undefined {
   if (typeof raw.title !== 'string' || !raw.title) return undefined;
   if (typeof raw.goal !== 'string' || !raw.goal) return undefined;
   const validTypes = ['discovery', 'implementation', 'validation'];
@@ -359,13 +368,55 @@ export function sanitizeDraftMemoryEntry(raw: Record<string, unknown>): DraftMem
   return { category, title: raw.title, content: raw.content };
 }
 
-const VALID_DELTA_TYPES = [
-  'add_constraint', 'remove_constraint', 'add_decision', 'remove_decision',
-  'add_risk', 'remove_risk', 'add_known_file', 'remove_known_file',
-  'set_goal', 'set_phase', 'set_next_step', 'set_phase_goal',
-  'add_phase_exit_criterion', 'remove_phase_exit_criterion',
-  'clear_phase_exit_criteria',
-] as const;
+// Build a compact parent context summary for scratchpad inheritance.
+// Frozen at spawn time — not updated while the scratchpad is open.
+export function buildParentContextSummary(
+  state: CanonicalProjectState | null,
+  memory: DurableMemory,
+  recentMessages: ChatMessage[],
+  taskContext?: TaskContext,
+): string {
+  const parts: string[] = [];
+
+  if (state) {
+    const compact: string[] = [];
+    if (state.goal) compact.push(`Goal: ${state.goal}`);
+    if (state.phase) compact.push(`Phase: ${state.phase}`);
+    if (state.phaseGoal) compact.push(`Phase goal: ${state.phaseGoal}`);
+    if (state.nextStep) compact.push(`Next step: ${state.nextStep}`);
+    compact.push(`State version: v${state.version}`);
+    parts.push(compact.join('\n'));
+  }
+
+  const activeMemory = memory.entries.filter(e => e.active);
+  if (activeMemory.length > 0) {
+    const titles = activeMemory.map(e => `  - [${e.category}] ${e.title}`);
+    parts.push(`Active memory (${activeMemory.length}):\n${titles.join('\n')}`);
+  }
+
+  if (taskContext) {
+    const taskParts: string[] = [];
+    if (taskContext.activeTasks.length > 0) {
+      taskParts.push(`Active tasks: ${taskContext.activeTasks.map(t => `"${t.title}" [${t.status}]`).join(', ')}`);
+    }
+    if (taskContext.awaitingReview.length > 0) {
+      taskParts.push(`Awaiting review: ${taskContext.awaitingReview.map(t => `"${t.title}"`).join(', ')}`);
+    }
+    if (taskParts.length > 0) parts.push(taskParts.join('\n'));
+  }
+
+  // Last few main chat messages (compact)
+  const recent = recentMessages.slice(-5);
+  if (recent.length > 0) {
+    const lines = recent.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.length > 200 ? m.content.slice(0, 197) + '...' : m.content}`);
+    parts.push(`Recent conversation:\n${lines.join('\n')}`);
+  }
+
+  return parts.join('\n\n');
+}
+
+// Re-export for backward compat — canonical list lives in domain/state-delta.ts
+const VALID_DELTA_TYPES = VALID_DELTA_OP_TYPES;
 
 export function sanitizeDeltaOperation(raw: Record<string, unknown>): DeltaOperation | undefined {
   const type = raw.type;

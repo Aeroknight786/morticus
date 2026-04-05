@@ -11,10 +11,12 @@ import { MorticusError } from '../domain/errors.js';
 import { buildDelta } from '../review/delta-builder.js';
 import { validateDelta } from '../review/validator.js';
 import { buildPrompt } from './prompt-builder.js';
-import { runClaude } from './claude-adapter.js';
+import { runLlm, getConfiguredProvider } from './llm-provider.js';
 import { prepareWorktree, cleanupWorktree } from './worktree-manager.js';
 import { collectArtifacts } from './artifact-collector.js';
 import { normalizeOutput } from './output-normalizer.js';
+import { buildContextDiagnostics } from '../domain/context-policy.js';
+import { createAndExtractMemCell } from './memory-extractor.js';
 
 export interface RunControllerDeps {
   store: ProjectStore;
@@ -54,7 +56,8 @@ export class RunController {
 
     // 1. Create run record
     const runId = generateRunId();
-    let run: TaskRun = createTaskRun(runId, task.id, 'claude');
+    const provider = getConfiguredProvider();
+    let run: TaskRun = createTaskRun(runId, task.id, provider);
     await this.store.runs.save(run);
 
     // 2. Transition task to running
@@ -73,6 +76,7 @@ export class RunController {
       // Snapshot context metrics at run creation for historical accuracy
       const memory = await this.store.memory.get();
       const activeMemoryCount = memory.entries.filter(e => e.active).length;
+      const manifest = spec.contextPack.contextManifest;
       run = {
         ...run,
         status: 'running',
@@ -82,18 +86,22 @@ export class RunController {
           estimatedTokens: spec.contextPack.estimatedTokens,
           activeMemoryEntryCount: activeMemoryCount,
           stablePrefixLength: spec.contextPack.stablePrefix.length,
+          memoryIncluded: manifest?.memoryIncluded ?? activeMemoryCount,
+          memoryExcluded: manifest?.memoryExcluded ?? 0,
+          contextDiagnostics: manifest ? buildContextDiagnostics(manifest) : null,
         },
       };
       await this.store.runs.save(run);
 
       // 4. Build and execute prompt
       const prompt = buildPrompt(spec.contextPack);
-      console.log(`[morticus] run ${runId} — estimated tokens: ${spec.contextPack.estimatedTokens}`);
+      console.log(`[morticus] run ${runId} — provider: ${provider}, estimated tokens: ${spec.contextPack.estimatedTokens}`);
 
-      const claudeResult = await runClaude(prompt, {
+      const claudeResult = await runLlm(prompt, {
         workingDirectory: worktreeResult.path ?? this.workspaceRoot,
         timeoutMs: 300_000,
         signal: abortSignal,
+        sandbox: 'workspace-write',
       });
 
       // 5. Persist raw output
@@ -150,7 +158,26 @@ export class RunController {
       };
       await this.store.runs.save(run);
 
-      // 13. Cleanup worktree (non-fatal)
+      // 13. Create MemCell from task run output (non-fatal)
+      try {
+        const memCell = await createAndExtractMemCell(
+          `task:${task.id}`,
+          'task_completed',
+          claudeResult.stdout,
+          {
+            goal: currentState.goal,
+            phase: currentState.phase,
+            decisions: currentState.decisions,
+          },
+          { workingDirectory: this.workspaceRoot },
+        );
+        memCell.relatedTaskIds = [task.id];
+        await this.store.memcells.save(memCell);
+      } catch (memCellErr) {
+        console.warn(`[morticus] MemCell extraction failed for run ${runId}: ${(memCellErr as Error).message}`);
+      }
+
+      // 14. Cleanup worktree (non-fatal)
       if (worktreeResult.path) {
         await cleanupWorktree(this.workspaceRoot, worktreeResult.path).catch(err => {
           console.warn(`[morticus] worktree cleanup failed: ${(err as Error).message}`);

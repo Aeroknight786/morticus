@@ -14,6 +14,9 @@ import { SpecStore } from './spec-store.js';
 import { RunStore } from './run-store.js';
 import { ChatStore } from './chat-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
+import { ScratchpadStore } from './scratchpad-store.js';
+import { ArchiveStore } from './archive-store.js';
+import { MemCellStore } from './memcell-store.js';
 
 const MORTICUS_DIR = '.morticus';
 const PROJECT_FILE = 'project.json';
@@ -29,6 +32,9 @@ export class ProjectStore {
   readonly runs: RunStore;
   readonly chat: ChatStore;
   readonly checkpoints: CheckpointStore;
+  readonly scratchpad: ScratchpadStore;
+  readonly archive: ArchiveStore;
+  readonly memcells: MemCellStore;
   private migrated = false;
 
   constructor(workspacePath: string) {
@@ -42,6 +48,9 @@ export class ProjectStore {
     this.runs = new RunStore(this.morticusPath);
     this.chat = new ChatStore(this.morticusPath);
     this.checkpoints = new CheckpointStore(path.join(this.morticusPath, 'checkpoints.json'));
+    this.scratchpad = new ScratchpadStore(this.morticusPath);
+    this.archive = new ArchiveStore(this.morticusPath);
+    this.memcells = new MemCellStore(this.morticusPath);
   }
 
   async isInitialized(): Promise<boolean> {

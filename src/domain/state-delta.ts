@@ -19,6 +19,15 @@ export type DeltaOperation =
   | { type: 'remove_phase_exit_criterion'; value: string }
   | { type: 'clear_phase_exit_criteria' };
 
+// Canonical list of valid delta operation type strings, derived from the DeltaOperation union.
+export const VALID_DELTA_OP_TYPES = [
+  'add_constraint', 'remove_constraint', 'add_decision', 'remove_decision',
+  'add_risk', 'remove_risk', 'add_known_file', 'remove_known_file',
+  'set_goal', 'set_phase', 'set_next_step', 'set_phase_goal',
+  'add_phase_exit_criterion', 'remove_phase_exit_criterion',
+  'clear_phase_exit_criteria',
+] as const;
+
 export interface DeltaConflict {
   severity: 'warning' | 'error';
   type: ConflictType;

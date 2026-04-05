@@ -49,19 +49,28 @@ The system should let a builder:
 - Conversational task drafting
 - Inline task card editing
 - Better kickoff acceptance flow
-- Suggested kickoff tasks as post-accept suggestions
+- Suggested kickoff tasks as post-accept suggestions (persistent across reopen)
 - Enriched steering context with task activity
+- "What should we do next?" — grounded strategic suggestions from state + task status
+- Chat-driven state updates (draft delta → review panel)
+- Chat-driven phase transitions (compose complete transition deltas)
+- Chat-driven memory proposals (draft memory → review)
+- Intent pre-classification (deterministic fast path before Claude)
+- Transcript compaction / token-budget sliding window
+- Task Detail Panel (metadata, spec summary, run history, candidate delta, action buttons)
+- Checkpoint + resume from state (named bookmarks, repoint current, archive active tasks)
+- Schema migration (forward-only, v1→v2 parentVersion backfill)
+- Context slicing (category filters, token budgets, priority trimming)
+- Chat as home surface (project snapshot, create & run, review outcomes routed to chat, kickoff completeness cues)
 
 ## Current gaps
-- Chat is not yet the obvious long-term home surface
-- Post-accept suggested tasks need strong persistence and continuity
-- Main strategic trunk is still shallow
-- "What should we do next?" does not yet exist
-- Task runs still feel closer to jobs than true task workspaces
-- Branch/discard/resume from state is not yet real
+- Memory is flat (single-type entries) — needs multi-type structured memory (EverMemOS-inspired MemCell model)
 - Archive / retrieval / scratchpad are not yet built
-- Context slicing is still immature relative to the long-term vision
+- Context slicing can be deeper (per-subsystem, per-risk relevance)
 - Reconciliation against repo reality is still minimal
+- No shadow analysis runs
+- No transcript import / migration (8A in progress — Claude CLI JSONL primary)
+- No generation tree navigation UI
 
 ---
 
@@ -107,11 +116,15 @@ Should produce structured handoff on exit:
 ## Canonical State
 What the project currently believes.
 
-## Durable Memory
-Long-lived project knowledge that can influence future runs.
+## Durable Memory (EverMemOS-Inspired)
+Multi-type structured memory with boundary-aware extraction:
+- **Episodic**: what happened — compact narrative summaries of sessions, task runs, reviews
+- **Event**: atomic facts — individual decisions, constraints, conventions (current `MemoryEntry`)
+
+Memory is extracted from MemCells (boundary-detected interaction chunks), not from flat entries. One LLM call per MemCell produces both types. Foresight and profile extraction (from EverMemOS) are not ported — canonical state `risks`/`nextStep` and `CanonicalProjectState` already serve those roles with review-gating.
 
 ## Archive
-Transcript and run history outside hot context, retrievable when relevant.
+Transcript and run history outside hot context, retrievable when relevant. MemCells serve as the archive unit.
 
 ---
 
@@ -312,80 +325,204 @@ This gives the user a place for messy thought without destroying the architectur
 
 ---
 
-## Phase 7 — Archive and Retrieval Layer
+## Phase 7A — MemCell Foundation (EverMemOS-Inspired)
 
 ### Goal
-Keep transcripts and historical work available without bloating active model context.
+Establish the MemCell as Morticus's atomic memory unit. This is the architectural foundation that import, context slicing, archive, and retrieval all build on. Must land before any of those phases.
+
+### Why this must come first
+- Import (Phase 8) needs to produce MemCells, not flat chunks — building both separately means building twice
+- Context slicing (Phase 9) needs memory types and BM25/RRF — the current `scoreKeywordRelevance` is a placeholder
+- Archive storage needs MemCells as the retrieval unit
+- Scratchpad v2 needs MemCell output on exit
+- `TranscriptChunk` in import and `MemCell` in the memory engine are the same abstraction
+
+### Key Concepts (from EverMemOS, Apache 2.0)
+- **MemCell**: Boundary-detected memory unit. A coherent chunk of interaction, not an arbitrary slice. Created at natural boundaries (task completion, review acceptance, chat topic shift) or force-split thresholds (8192 tokens / 50 messages).
+- **Multi-type extraction**: From each MemCell, extract in a single LLM call:
+  - **Episodic**: Narrative summary of what happened ("benchmarked bitboards vs mailbox, chose bitboards for 3x perf")
+  - **Event Log**: Atomic facts — individual decisions, constraints, conventions (maps to current `MemoryEntry`)
+- **BM25 + RRF retrieval**: Proper term-frequency scoring and reciprocal rank fusion. Replaces `scoreKeywordRelevance`.
+- **Type-aware retrieval**: Episodic summaries for broad context, event log for precision facts.
+
+### What we extract (simplified from EverMemOS)
+EverMemOS extracts 4 types (episodic, foresight, event log, profile) via 3-4 parallel LLM calls per MemCell. Morticus extracts 2 types (episodic + events) in 1 LLM call. Rationale:
+- **Foresight** (predictions): Canonical state `risks` + `nextStep` already captures this, review-gated. LLM-speculative predictions are lower value for software projects.
+- **Profile** (progressive model): `CanonicalProjectState` IS the progressive project profile. A second LLM-generated profile would conflict.
+- **Episodic + Event Log**: High value. Episodic gives compact narrative summaries for context packing. Events give searchable atomic facts. One extraction call produces both.
+
+### Natural Boundaries in Morticus (MemCell Sources)
+| Event | Boundary Type |
+|---|---|
+| Task run completion | Natural — one MemCell per run |
+| Review acceptance | Natural — decisions become events |
+| Chat session turn (long) | Force-split at 8192 tokens / 50 messages |
+| Scratchpad exit | Natural — handoff produces MemCell |
+| Import chunk processing | Pre-chunked by transcript parser |
 
 ### Deliverables
-- archive task transcripts
-- archive trunk history
-- archive scratchpads
-- archive run outputs / review discussions
-- hybrid retrieval:
-  - keyword
-  - vector
-  - metadata
-- archive summaries and source links
 
-### Rules
-- archive is not canonical state
-- retrieved material must be selective and compact
-- do not automatically stuff archive into live context
+**Domain (~60 lines)**
+- `MemCell` type with boundary metadata, source reference, timestamp
+- `MemoryType` union: `'episodic' | 'event'`
+- `BoundaryReason` union: `'task_completed' | 'review_accepted' | 'force_split' | 'topic_shift' | 'scratchpad_exit' | 'import_chunk'`
+- `memCellId` link on `MemoryEntry`
+
+**Runtime (~230 lines)**
+- `memory-extractor.ts`: MemCell extraction — single LLM call → episodic summary + atomic events
+- Boundary detection: force-split thresholds + natural boundary hooks
+- Replaces current `knowledge-extractor.ts` single-pass pattern
+
+**Retrieval (~100 lines)**
+- `memory-retrieval.ts`: BM25 tokenizer + index, RRF fusion algorithm
+- Replaces `scoreKeywordRelevance` in context-pack
+
+**Storage (~70 lines)**
+- `memcell-store.ts`: MemCell persistence, retrieval by time range / source / keyword
+- Wired into `ProjectStore`
+
+**Wiring (~60 lines)**
+- `run-controller.ts`: trigger MemCell creation on task completion
+- `chat-adapter.ts`: boundary detection for long sessions
+
+**Tests (~300 lines)**
+
+### Architecture Placement
+```
+src/domain/durable-memory.ts    → MemCell type, MemoryType, BoundaryReason, memCellId on MemoryEntry
+src/runtime/memory-extractor.ts → NEW: MemCell extraction (replaces knowledge-extractor pattern)
+src/runtime/memory-retrieval.ts → NEW: BM25 index + RRF fusion
+src/compiler/context-pack.ts    → Type-aware memory selection, BM25/RRF scoring
+src/storage/memcell-store.ts    → NEW: MemCell persistence
+```
+
+### What This Does NOT Include
+- No MongoDB / Elasticsearch / Milvus / Redis (local JSON storage)
+- No Docker infrastructure dependency
+- No vector embeddings (keyword retrieval via BM25 is sufficient for v1)
+- No foresight or profile extraction (canonical state handles these)
+- No external API dependency for core memory operations
+
+### Design Principle
+Port EverMemOS's **memory model and extraction logic** (Apache 2.0), not its infrastructure. Morticus stays local-first and review-gated. MemCell extraction is LLM-assisted; boundary detection, retrieval, and storage are pure TypeScript.
 
 ### Why this phase matters
-This is critical for restartability, long project continuity, and cost control.
+This is the foundation everything else builds on. Import produces MemCells. Context slicing consumes them by type. Archive stores them. Retrieval searches them. Without this, each downstream phase invents its own memory abstraction.
 
 ---
 
-## Phase 8 — Transcript Import / Migration
+## Phase 7B — Context Slicing v2 (MemCell-Aware)
 
 ### Goal
-Reduce onboarding friction by importing prior AI work and compiling it into Morticus structures.
+Upgrade context slicing (Phase 9 v1) to use MemCell types and BM25/RRF retrieval instead of flat keyword matching.
 
-### Inputs
-- markdown transcripts
-- chat dumps
-- text notes
-- prior planning docs
+### What changes from v1
+| v1 (current) | v2 (MemCell-aware) |
+|---|---|
+| `scoreKeywordRelevance()` keyword overlap | BM25 term-frequency scoring + RRF fusion |
+| Category-based filtering (`architecture`, `convention`, etc.) | Type-based filtering (`episodic` for summaries, `event` for precision) |
+| No temporal awareness | Recency weighting — newer MemCells preferred for active work |
+| `ContextManifest` tracks included/excluded counts | Manifest tracks memory types included, BM25 scores, temporal range |
+| `resolveContextProfile()` returns category + keyword config | Profile returns type preferences per surface + retrieval strategy |
+
+### Deliverables
+- `resolveContextProfile()` extended with memory type preferences per surface
+- `buildMemoryEntries()` uses BM25/RRF from `memory-retrieval.ts`
+- Episodic summaries preferred for task context (compact, narrative)
+- Event entries preferred for precision queries (atomic, searchable)
+- Temporal weighting in retrieval scoring
+- Updated `ContextManifest` with type + score diagnostics
+
+### Dependencies
+- Phase 7A (MemCell types, BM25/RRF retrieval, memory type on entries)
+
+### Why this phase matters
+v1 context slicing works but uses crude keyword matching on flat entries. MemCell-aware slicing selects the right *type* of memory for each surface at higher relevance with lower token cost.
+
+---
+
+## Phase 8 — Transcript Import / Migration (MemCell-Native)
+
+### Goal
+Reduce onboarding friction by importing prior AI work and compiling it into Morticus's MemCell-based memory model.
+
+### Key change from original design
+Import chunks map directly to MemCells. `TranscriptChunk` and `DocSection` become MemCell inputs, not a separate abstraction. Extraction produces episodic summaries + atomic events per MemCell, using the same `memory-extractor.ts` from Phase 7A. No separate `ImportExtractionResult` type — import reuses the MemCell pipeline.
+
+### Primary source (Phase 8A): Claude CLI JSONL
+Claude CLI stores conversations as JSONL at `~/.claude/projects/<hash>/<id>.jsonl`.
+Each line is a structured message event with explicit roles, tool use, and timestamps.
+This is the cleanest import path and the default target for Phase 8A.
+
+The JSONL format gives us:
+- no heuristic format detection needed
+- roles are typed fields, not regex-matched strings
+- tool use / tool results are structured (can skip or compress)
+- timestamps for ordering and provenance
+
+### Secondary sources (Phase 8B, lower priority)
+- markdown transcripts (heading-based or bold-prefix)
+- plain text chat dumps (`User:` / `Assistant:` prefixes)
+- prior planning docs (section-based extraction)
+
+### Import pipeline (MemCell-native)
+```
+File → parse/chunk → boundary detection → MemCell creation
+                                            ↓
+                              MemCell extraction (episodic + events)
+                                            ↓
+                              Conflict detection vs canonical state
+                                            ↓
+                              Import panel → selective review/accept
+```
 
 ### Outputs
-- draft canonical state
-- candidate durable memory
-- candidate tasks
-- archive records
-- ambiguity / conflict report
+- MemCells (archived, searchable)
+- Draft canonical state (from episodic summaries)
+- Candidate memory entries (from event extraction, origin: 'imported')
+- Candidate tasks
+- Conflict report
 
 ### Rules
 - imported material is not truth by default
 - import is compilation + review, not trust
-- provenance must be preserved
+- provenance must be preserved (`sourceArchiveId`, `memCellId`)
+- tool use content should be compressed or skipped by the extractor
+
+### Dependencies
+- Phase 7A (MemCell types, extraction pipeline, storage)
 
 ### Why this phase matters
-This is a strong adoption wedge.
+This is a strong adoption wedge. Claude CLI JSONL means any user who has been planning in Claude Code can migrate their prior thinking directly into Morticus's structured memory.
 
 ---
 
-## Phase 9 — Context Slicing and Cost Governance
+## Phase 8B — Scratchpad v2 (MemCell Output)
 
 ### Goal
-Reduce cost and improve quality by sending only relevant slices of state, memory, and archive into each run.
+Upgrade scratchpad exit to produce MemCells instead of flat handoff objects. Scratchpad sessions become searchable, retrievable memory after exit.
 
-### Deliverables
-- state slicing for subtasks
-- memory slicing
-- archive slice retrieval
-- stable prompt prefixes
-- stronger token estimation / cost visibility
-- fresh-run-from-snapshot patterns everywhere
+### What changes
+- Scratchpad exit runs MemCell extraction (episodic summary + events) on the session
+- Archived scratchpad = MemCell with `boundaryReason: 'scratchpad_exit'`
+- Handoff still produces typed fields (draft task, draft delta, memory candidate) but these now link to the source MemCell
 
-### Rules
-- do not send full canonical state into every subtask
-- choose relevance by task type, scope, subsystem, phase, and risks
-- optimize for the smallest sufficient context
+### Dependencies
+- Phase 7A (MemCell extraction pipeline)
 
-### Why this phase matters
-This is both a quality and economics layer.
+---
+
+## Phase 9 v1 — Context Slicing and Cost Governance (DONE)
+
+### Status: Complete (v1)
+Basic context slicing with category filters, scope-based filtering, keyword relevance scoring, token budgets, priority trimming. See Phase 7B for the MemCell-aware upgrade.
+
+### What v1 delivered
+- `ContextProfile` per surface with state/memory/token policies
+- `resolveContextProfile()` maps surface + taskType → defaults
+- `scoreKeywordRelevance()` for basic keyword matching
+- `ContextManifest` tracking what was included/excluded
+- Scope-based filtering for knownFiles, decisions, risks
 
 ---
 
@@ -398,6 +535,7 @@ Allow important retrieved/async material to be studied without bloating the acti
 - bounded secondary analysis runs
 - same base state/task context
 - narrow analysis objective
+- MemCell-based retrieval to select analysis targets
 - compressed structured return:
   - summary
   - evidence
@@ -408,6 +546,9 @@ Allow important retrieved/async material to be studied without bloating the acti
 - no direct mutation from shadow runs
 - use sparingly
 - no uncontrolled recursive spawning
+
+### Dependencies
+- Phase 7A (MemCell retrieval for selecting relevant historical material)
 
 ### Why this phase matters
 This unlocks strong retrieval and historical reuse without context explosion.
@@ -436,6 +577,48 @@ Make project truth checked, not just remembered.
 
 ### Why this phase matters
 This is one of the deepest trust and differentiation layers.
+
+---
+
+## Phase 11.5 — Spoken Record Layer (EverMemOS-Inspired)
+
+### Goal
+Persistent, searchable record of all conversational interaction. Not authoritative — feeds reconciliation checks against canonical state.
+
+### What it captures
+Everything that canonical state intentionally discards:
+- **Reasoning**: why decisions were made, alternatives considered, arguments for/against
+- **Failed experiments**: approaches that were tried and abandoned, and why
+- **Correction patterns**: repeated mistakes, things the agent keeps getting wrong
+- **Evolving understanding**: how the team's mental model shifted over time
+
+### Relationship to canonical state
+```
+Canonical State  →  What IS true (authoritative, review-gated)
+Durable Memory   →  What should be remembered (curated facts)
+Spoken Record    →  What was SAID (comprehensive, not authoritative)
+```
+
+The spoken record never overrides canonical state. When retrieval surfaces spoken material that contradicts a canonical decision, that's a **reconciliation flag**, not an automatic update.
+
+### Use cases
+- "Did we ever discuss X?" → search spoken record, get context
+- "Why did we decide Y?" → MemCell with the conversation that produced decision Y
+- "Has understanding drifted?" → compare recent spoken record against canonical state
+- "The agent keeps making the same mistake" → pattern detection across spoken MemCells
+
+### Implementation
+- Full EverMemOS-style memory ingestion: every chat turn, task run, review, scratchpad → MemCells → stored
+- BM25/RRF retrieval over the full spoken record
+- Reconciliation consumer compares spoken record trends against canonical state
+- Optional: agentic multi-round retrieval (sufficiency check → refined queries → merge)
+
+### Dependencies
+- Phase 7A (MemCell foundation)
+- Phase 11 (reconciliation — the primary consumer)
+
+### Why this phase matters
+This closes the gap between "what we decided" and "why we decided it." Without it, the reasoning behind canonical state evaporates with chat transcripts.
 
 ---
 
@@ -482,25 +665,30 @@ Do not prioritize before the single-user product clearly works.
 
 # Sequencing Guidance
 
-## Near-term priority
-1. Phase 4A.6
-2. Phase 4B.1
-3. Phase 4B.2
-4. Phase 4B.3
-5. Phase 4C
+## Completed
+1. Phase 4A.6 — Chat Centrality and Continuity
+2. Phase 4B.1 — "What should we do next?"
+3. Phase 4B.2 — Chat-Driven State Updates
+4. Phase 4B.3 — Chat-Driven Phase Transitions
+5. Phase 4C — Task Workspace Strengthening
+6. Phase 5 — Checkpoint + Resume from State
+7. Phase 5A — Schema Migration + Context Slicing
+8. Chat as Coherent Home Surface (project snapshot, create & run, review outcomes, completeness cues)
+9. Phase 6 — Scratchpad Mode (v1)
+10. Phase 9 — Context Slicing and Cost Governance (v1)
 
-## Mid-term priority
-6. Phase 5
-7. Phase 6
-8. Phase 7
-9. Phase 8
-10. Phase 9
+## Next (dependency-ordered)
+11. **Phase 7A — MemCell Foundation** ← architectural prerequisite for everything below
+12. Phase 7B — Context Slicing v2 (MemCell-aware, replaces v1 keyword matching)
+13. Phase 8A — Transcript Import (Claude CLI JSONL, MemCell-native)
+14. Phase 8B — Scratchpad v2 (MemCell output on exit)
 
-## Longer-term priority
-11. Phase 10
-12. Phase 11
-13. Phase 12
-14. Phase 13
+## Longer-term
+15. Phase 10 — Shadow Analysis Runs (consumes MemCells)
+16. Phase 11 — Reconciliation Against Repo Reality
+17. Phase 11.5 — Spoken Record Layer (EverMemOS-inspired persistent conversational memory, feeds reconciliation)
+18. Phase 12 — Generation Navigation UI
+19. Phase 13 — Team / Enterprise Layer
 
 ---
 
@@ -526,16 +714,15 @@ Conversation should produce typed drafts, not hidden magic.
 ## Favor sliced context
 Never assume full canonical state belongs in every subtask.
 
+## MemCells are the universal memory unit
+All memory flows through MemCells. Import produces MemCells. Tasks produce MemCells on completion. Scratchpads produce MemCells on exit. Context slicing consumes MemCells by type. Archive stores MemCells. Do not build parallel memory abstractions.
+
 ---
 
 # Immediate Next Step
 
 The next planned implementation target should be:
 
-## Phase 4A.6 — Chat Centrality and Continuity
+## Phase 7A — MemCell Foundation
 
-After that:
-
-## Phase 4B.1 — "What should we do next?"
-
-Do not jump to broad 4B all at once.
+Architectural prerequisite for import, context slicing v2, scratchpad v2, shadow analysis, and reconciliation. Establishes the MemCell as the atomic memory unit across all Morticus subsystems.

@@ -33,6 +33,8 @@ export function extractKnowledge(
       origin: 'auto_extracted',
       active: false,
       reviewed: false,
+      sourceArchiveId: null,
+      memCellId: null,
       sourceTaskId: taskId,
       sourceRunId: runId,
       sourceDeltaId: deltaId,

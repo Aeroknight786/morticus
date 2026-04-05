@@ -68,6 +68,7 @@ export class RunDetailPanel extends WebviewBase {
         html += '<div class="label">Run ID</div><div class="value">' + esc(run.id) + '</div>';
         html += '<div class="label">Task</div><div class="value">' + esc(run.taskId) + '</div>';
         html += '<div class="label">Status</div><div class="value">' + esc(run.status) + '</div>';
+        html += '<div class="label">Provider</div><div class="value">' + esc(run.provider || 'claude') + '</div>';
         html += '</div>';
 
         // Timing
@@ -88,8 +89,14 @@ export class RunDetailPanel extends WebviewBase {
           html += '<div class="section">';
           html += '<div class="label">Context Cost</div>';
           html += '<div class="metric">Tokens: ~' + cm.estimatedTokens + '</div>';
-          html += '<div class="metric">Memory entries: ' + cm.activeMemoryEntryCount + '</div>';
+          html += '<div class="metric">Memory: ' + (cm.memoryIncluded != null ? cm.memoryIncluded + ' included' : cm.activeMemoryEntryCount + ' entries') + '</div>';
+          if (cm.memoryExcluded) {
+            html += '<div class="metric">Memory excluded: ' + cm.memoryExcluded + '</div>';
+          }
           html += '<div class="metric">Stable prefix: ' + cm.stablePrefixLength + ' chars</div>';
+          if (cm.contextDiagnostics) {
+            html += '<details style="margin-top:8px"><summary style="font-size:12px;cursor:pointer">Context Diagnostics</summary><pre style="font-size:11px;margin-top:4px">' + esc(cm.contextDiagnostics) + '</pre></details>';
+          }
           html += '</div>';
         }
 

@@ -122,6 +122,8 @@ describe('deduplicateEntries', () => {
       sourceRunId: RUN_ID,
       sourceDeltaId: DELTA_ID,
       sourceOperationType: 'add_decision',
+      sourceArchiveId: null,
+      memCellId: null,
       createdAt: '2024-01-01T00:00:00.000Z',
       updatedAt: '2024-01-01T00:00:00.000Z',
       ...overrides,

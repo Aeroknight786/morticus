@@ -48,6 +48,7 @@ export interface ChatTurnResult {
   draftTasks?: DraftTask[];
   draftDelta?: DeltaOperation[];
   draftMemory?: DraftMemoryEntry[];
+  contextTokenEstimate?: number;
 }
 
 // Lightweight task context for enriching the steering prompt.
@@ -56,18 +57,6 @@ export interface TaskContext {
   activeTasks: { title: string; taskType: string; status: string }[];
   recentlyCompleted: { title: string; taskType: string; goal: string }[];
   awaitingReview: { title: string }[];
-}
-
-// Compact project state snapshot for the chat home surface.
-// Pure type — built from CanonicalProjectState + task list in the UI layer.
-export interface ProjectSnapshot {
-  goal: string;
-  phase: string;
-  phaseGoal: string;
-  nextStep: string;
-  stateVersion: number;
-  activeTaskCount: number;
-  awaitingReviewCount: number;
 }
 
 export type ChatMode = 'kickoff' | 'steering';

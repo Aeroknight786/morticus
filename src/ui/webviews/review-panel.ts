@@ -5,6 +5,7 @@ import type { NormalizedOutput } from '../../domain/task-run.js';
 import type { ProjectStore } from '../../storage/store.js';
 import { applyAcceptedDelta } from '../../review/delta-applier.js';
 import { extractKnowledge, deduplicateEntries } from '../../review/knowledge-extractor.js';
+import { transitionTask } from '../../domain/task.js';
 
 export class ReviewPanel extends WebviewBase {
   private delta: StateDelta | null = null;
@@ -146,12 +147,16 @@ export class ReviewPanel extends WebviewBase {
         project.currentStateVersion = result.newState.version;
         await this.store.updateProject(project);
 
-        // Resolve task title for knowledge extraction and review routing
+        // Resolve task title and transition task to merged
         let taskTitle = 'Chat proposal';
         if (this.delta.taskId) {
           try {
             const task = await this.store.tasks.get(this.delta.taskId);
             taskTitle = task.title;
+            if (task.status === 'awaiting_review') {
+              const merged = transitionTask(task, 'merged');
+              await this.store.tasks.save(merged);
+            }
           } catch {
             // Task may have been deleted; use fallback title
           }
@@ -207,6 +212,10 @@ export class ReviewPanel extends WebviewBase {
         try {
           const task = await this.store.tasks.get(this.delta.taskId);
           taskTitle = task.title;
+          if (task.status === 'awaiting_review') {
+            const rejected = transitionTask(task, 'rejected');
+            await this.store.tasks.save(rejected);
+          }
         } catch { /* fallback */ }
       }
       this.delta = { ...this.delta, status: 'rejected', reviewedAt: new Date().toISOString() };

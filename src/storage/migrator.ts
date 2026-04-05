@@ -3,7 +3,7 @@ import { readJson, writeJson, listJsonFiles } from './json-backend.js';
 import { MorticusError } from '../domain/errors.js';
 
 // Current schema version. Bump this when adding a new migration step.
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 export interface MigrationStep {
   fromVersion: number;
@@ -30,6 +30,60 @@ const MIGRATIONS: MigrationStep[] = [
           const version = state.version as number;
           state.parentVersion = version > 1 ? version - 1 : null;
           await writeJson(file, state);
+        }
+      }
+    },
+  },
+  {
+    fromVersion: 2,
+    toVersion: 3,
+    description: 'Add sourceArchiveId to memory entries',
+    async migrate(morticusPath: string) {
+      const entriesPath = path.join(morticusPath, 'memory', 'entries.json');
+      let memory: Record<string, unknown>;
+      try {
+        memory = await readJson<Record<string, unknown>>(entriesPath);
+      } catch {
+        return; // No memory file yet — nothing to migrate
+      }
+      const entries = memory.entries as Record<string, unknown>[];
+      if (!Array.isArray(entries)) return;
+      let changed = false;
+      for (const entry of entries) {
+        if (entry.sourceArchiveId === undefined) {
+          entry.sourceArchiveId = null;
+          changed = true;
+        }
+      }
+      if (changed) {
+        await writeJson(entriesPath, memory);
+      }
+    },
+  },
+  {
+    fromVersion: 3,
+    toVersion: 4,
+    description: 'Add memCellId to memory entries and create memcells directory',
+    async migrate(morticusPath: string) {
+      // Add memCellId: null to existing memory entries
+      const entriesPath = path.join(morticusPath, 'memory', 'entries.json');
+      let memory: Record<string, unknown>;
+      try {
+        memory = await readJson<Record<string, unknown>>(entriesPath);
+      } catch {
+        return; // No memory file yet — nothing to migrate
+      }
+      const entries = memory.entries as Record<string, unknown>[];
+      if (Array.isArray(entries)) {
+        let changed = false;
+        for (const entry of entries) {
+          if (entry.memCellId === undefined) {
+            entry.memCellId = null;
+            changed = true;
+          }
+        }
+        if (changed) {
+          await writeJson(entriesPath, memory);
         }
       }
     },
