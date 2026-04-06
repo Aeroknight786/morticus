@@ -7,31 +7,119 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "workspaceContains:.morticus/project.json"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
-      { "command": "morticus.initializeProject", "title": "Initialize Project", "category": "Morticus" },
-      { "command": "morticus.openStatePanel", "title": "Open Canonical State", "category": "Morticus", "icon": "$(symbol-structure)" },
-      { "command": "morticus.createTask", "title": "Create Task", "category": "Morticus", "icon": "$(add)" },
-      { "command": "morticus.compileTaskSpec", "title": "Compile Task Spec", "category": "Morticus" },
-      { "command": "morticus.runTask", "title": "Run Task", "category": "Morticus", "icon": "$(play)" },
-      { "command": "morticus.reviewDelta", "title": "Review State Delta", "category": "Morticus", "icon": "$(git-pull-request)" },
-      { "command": "morticus.refreshAll", "title": "Refresh", "category": "Morticus", "icon": "$(refresh)" },
-      { "command": "morticus.openMemoryPanel", "title": "Open Memory Panel", "category": "Morticus", "icon": "$(book)" },
-      { "command": "morticus.addMemoryEntry", "title": "Add Memory Entry", "category": "Morticus", "icon": "$(add)" },
-      { "command": "morticus.openHistoryPanel", "title": "Open State History", "category": "Morticus", "icon": "$(history)" },
-      { "command": "morticus.openRunDetail", "title": "Open Run Details", "category": "Morticus", "icon": "$(output)" },
-      { "command": "morticus.archiveTask", "title": "Archive Task", "category": "Morticus" },
-      { "command": "morticus.retryTask", "title": "Retry Task", "category": "Morticus" },
-      { "command": "morticus.editTask", "title": "Edit Task", "category": "Morticus", "icon": "$(edit)" },
-      { "command": "morticus.openChat", "title": "Open Chat", "category": "Morticus", "icon": "$(comment-discussion)" },
-      { "command": "morticus.openTaskDetail", "title": "Open Task Detail", "category": "Morticus", "icon": "$(symbol-class)" },
-      { "command": "morticus.resumeFromVersion", "title": "Resume from State Version", "category": "Morticus", "icon": "$(history)" },
-      { "command": "morticus.createCheckpoint", "title": "Create Checkpoint", "category": "Morticus", "icon": "$(bookmark)" }
+      {
+        "command": "morticus.initializeProject",
+        "title": "Initialize Project",
+        "category": "Morticus"
+      },
+      {
+        "command": "morticus.openStatePanel",
+        "title": "Open Canonical State",
+        "category": "Morticus",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "morticus.createTask",
+        "title": "Create Task",
+        "category": "Morticus",
+        "icon": "$(add)"
+      },
+      {
+        "command": "morticus.compileTaskSpec",
+        "title": "Compile Task Spec",
+        "category": "Morticus"
+      },
+      {
+        "command": "morticus.runTask",
+        "title": "Run Task",
+        "category": "Morticus",
+        "icon": "$(play)"
+      },
+      {
+        "command": "morticus.reviewDelta",
+        "title": "Review State Delta",
+        "category": "Morticus",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "morticus.refreshAll",
+        "title": "Refresh",
+        "category": "Morticus",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "morticus.openMemoryPanel",
+        "title": "Open Memory Panel",
+        "category": "Morticus",
+        "icon": "$(book)"
+      },
+      {
+        "command": "morticus.addMemoryEntry",
+        "title": "Add Memory Entry",
+        "category": "Morticus",
+        "icon": "$(add)"
+      },
+      {
+        "command": "morticus.openHistoryPanel",
+        "title": "Open State History",
+        "category": "Morticus",
+        "icon": "$(history)"
+      },
+      {
+        "command": "morticus.openRunDetail",
+        "title": "Open Run Details",
+        "category": "Morticus",
+        "icon": "$(output)"
+      },
+      {
+        "command": "morticus.archiveTask",
+        "title": "Archive Task",
+        "category": "Morticus"
+      },
+      {
+        "command": "morticus.retryTask",
+        "title": "Retry Task",
+        "category": "Morticus"
+      },
+      {
+        "command": "morticus.editTask",
+        "title": "Edit Task",
+        "category": "Morticus",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "morticus.openChat",
+        "title": "Open Chat",
+        "category": "Morticus",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "morticus.openTaskDetail",
+        "title": "Open Task Detail",
+        "category": "Morticus",
+        "icon": "$(symbol-class)"
+      },
+      {
+        "command": "morticus.resumeFromVersion",
+        "title": "Resume from State Version",
+        "category": "Morticus",
+        "icon": "$(history)"
+      },
+      {
+        "command": "morticus.createCheckpoint",
+        "title": "Create Checkpoint",
+        "category": "Morticus",
+        "icon": "$(bookmark)"
+      }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -44,10 +132,26 @@
     },
     "views": {
       "morticus-sidebar": [
-        { "id": "morticus-state", "name": "Canonical State", "type": "tree" },
-        { "id": "morticus-tasks", "name": "Tasks", "type": "tree" },
-        { "id": "morticus-memory", "name": "Memory", "type": "tree" },
-        { "id": "morticus-runs", "name": "Runs", "type": "tree" }
+        {
+          "id": "morticus-state",
+          "name": "Canonical State",
+          "type": "tree"
+        },
+        {
+          "id": "morticus-tasks",
+          "name": "Tasks",
+          "type": "tree"
+        },
+        {
+          "id": "morticus-memory",
+          "name": "Memory",
+          "type": "tree"
+        },
+        {
+          "id": "morticus-runs",
+          "name": "Runs",
+          "type": "tree"
+        }
       ]
     },
     "viewsWelcome": [
@@ -59,21 +163,66 @@
     ],
     "menus": {
       "view/title": [
-        { "command": "morticus.openStatePanel", "when": "view == morticus-state", "group": "navigation" },
-        { "command": "morticus.openHistoryPanel", "when": "view == morticus-state", "group": "navigation" },
-        { "command": "morticus.createTask", "when": "view == morticus-tasks", "group": "navigation" },
-        { "command": "morticus.openMemoryPanel", "when": "view == morticus-memory", "group": "navigation" },
-        { "command": "morticus.addMemoryEntry", "when": "view == morticus-memory", "group": "navigation" },
-        { "command": "morticus.refreshAll", "when": "view == morticus-state || view == morticus-tasks || view == morticus-memory || view == morticus-runs", "group": "navigation" }
+        {
+          "command": "morticus.openStatePanel",
+          "when": "view == morticus-state",
+          "group": "navigation"
+        },
+        {
+          "command": "morticus.openHistoryPanel",
+          "when": "view == morticus-state",
+          "group": "navigation"
+        },
+        {
+          "command": "morticus.createTask",
+          "when": "view == morticus-tasks",
+          "group": "navigation"
+        },
+        {
+          "command": "morticus.openMemoryPanel",
+          "when": "view == morticus-memory",
+          "group": "navigation"
+        },
+        {
+          "command": "morticus.addMemoryEntry",
+          "when": "view == morticus-memory",
+          "group": "navigation"
+        },
+        {
+          "command": "morticus.refreshAll",
+          "when": "view == morticus-state || view == morticus-tasks || view == morticus-memory || view == morticus-runs",
+          "group": "navigation"
+        }
       ],
       "view/item/context": [
-        { "command": "morticus.compileTaskSpec", "when": "view == morticus-tasks && viewItem == task-draft" },
-        { "command": "morticus.runTask", "when": "view == morticus-tasks && viewItem == task-ready" },
-        { "command": "morticus.reviewDelta", "when": "view == morticus-tasks && viewItem == task-awaiting_review" },
-        { "command": "morticus.editTask", "when": "view == morticus-tasks && viewItem == task-draft" },
-        { "command": "morticus.archiveTask", "when": "view == morticus-tasks && viewItem =~ /task-(draft|ready|running|awaiting_completion|normalizing_output|awaiting_review)/" },
-        { "command": "morticus.retryTask", "when": "view == morticus-tasks && viewItem =~ /task-(rejected|archived)/" },
-        { "command": "morticus.openRunDetail", "when": "view == morticus-runs" }
+        {
+          "command": "morticus.compileTaskSpec",
+          "when": "view == morticus-tasks && viewItem == task-draft"
+        },
+        {
+          "command": "morticus.runTask",
+          "when": "view == morticus-tasks && viewItem == task-ready"
+        },
+        {
+          "command": "morticus.reviewDelta",
+          "when": "view == morticus-tasks && viewItem == task-awaiting_review"
+        },
+        {
+          "command": "morticus.editTask",
+          "when": "view == morticus-tasks && viewItem == task-draft"
+        },
+        {
+          "command": "morticus.archiveTask",
+          "when": "view == morticus-tasks && viewItem =~ /task-(draft|ready|running|awaiting_completion|normalizing_output|awaiting_review)/"
+        },
+        {
+          "command": "morticus.retryTask",
+          "when": "view == morticus-tasks && viewItem =~ /task-(rejected|archived)/"
+        },
+        {
+          "command": "morticus.openRunDetail",
+          "when": "view == morticus-runs"
+        }
       ]
     }
   },
@@ -86,11 +235,14 @@
     "package": "vsce package"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.20.0",
-    "vitest": "^1.2.0",
-    "typescript": "^5.3.0"
+    "mocha": "^11.7.5",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
   },
   "dependencies": {
     "nanoid": "^5.0.4"
